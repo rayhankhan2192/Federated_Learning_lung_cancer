@@ -17,7 +17,7 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class CTScaneDataset(Dataset):
+class CTScanDataset(Dataset):
 
     def __init__(self, data_dir: str, transform=None, subset: str = 'train'):
         """
@@ -31,7 +31,7 @@ class CTScaneDataset(Dataset):
         self.subset = subset
 
         # Class mapping
-        self.class_to_idx = {'Normal case': 0, 'Benign case': 1, 'Malignant case': 2}
+        self.class_to_idx = {'Bengin cases': 0, 'Malignant cases': 1, 'Normal cases': 2,}
         self.idx_to_class = {v: k for k, v in self.class_to_idx.items()}
 
         # Load all image paths and labels
@@ -67,9 +67,325 @@ class CTScaneDataset(Dataset):
         class_counts = [0] * len(self.class_to_idx)
         for _, label in self.samples:
             class_counts[label] += 1
-        
+
         total_samples = len(self.samples)
-        weights = [total_samples / (len(self.class_to_idx) * count) for count in class_counts]
+        weights = []
+        for count in class_counts:
+            if count == 0:
+                weights.append(0.0)
+                logger.warning("⚠️ One or more classes have 0 samples — check your dataset.")
+            else:
+                weights.append(total_samples / (len(self.class_to_idx) * count))
+
         return torch.FloatTensor(weights)
+
+    def _print_class_distribution(self):
+        """Print class distribution for debugging"""
+        class_counts = [0] * len(self.class_to_idx)
+        for _, label in self.samples:
+            class_counts[label] += 1
+        
+        logger.info("Class distribution:")
+        for idx, count in enumerate(class_counts):
+            class_name = self.idx_to_class[idx]
+            logger.info(f"  {class_name}: {count} samples")
+
     
+    def __len__(self) -> int:
+        return len(self.samples)
     
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, int]:
+        img_path, label = self.samples[idx]
+        
+        # Load and preprocess image
+        image = self._load_and_preprocess_image(img_path)
+        
+        # Apply transforms
+        if self.transform:
+            transformed = self.transform(image=image)
+            image = transformed['image']
+        
+        return image, label
+    
+    def _load_and_preprocess_image(self, img_path: str) -> np.ndarray:
+        """Load and preprocess medical CT scan image"""
+        try:
+            # Load image
+            image = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
+            
+            if image is None:
+                raise ValueError(f"Could not load image: {img_path}")
+            
+            # Medical image preprocessing
+            image = self._apply_medical_preprocessing(image)
+            
+            return image
+            
+        except Exception as e:
+            logger.error(f"Error loading image {img_path}: {str(e)}")
+            # Return a blank image as fallback
+            return np.zeros((512, 512), dtype=np.uint8)
+        
+    def _apply_medical_preprocessing(self, image: np.ndarray) -> np.ndarray:
+        """Apply medical-specific preprocessing to CT scans"""
+        # Resize to standard size
+        image = cv2.resize(image, (512, 512), interpolation=cv2.INTER_CUBIC)
+        
+        # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        image = clahe.apply(image)
+        
+        # Normalize to [0, 255] range
+        image = cv2.normalize(image, None, 0, 255, cv2.NORM_MINMAX)
+        
+        # Convert to float32 for albumentations
+        #image = image.astype(np.float32) / 255.0
+        image = image.astype(np.uint8)
+        
+        return image
+    
+def get_medical_transforms(image_size: Tuple[int, int] = (224, 224), 
+                          subset: str = 'train') -> A.Compose:
+    """
+    Get medical image augmentation transforms using Albumentations
+    
+    Args:
+        image_size: Target image size (height, width)
+        subset: 'train', 'val', or 'test'
+    
+    Returns:
+        Albumentations compose object
+    """
+    
+    if subset == 'train':
+        # Training augmentations - medical image specific
+        transform = A.Compose([
+            # Geometric transforms
+            A.Resize(height=image_size[0], width=image_size[1], interpolation=cv2.INTER_CUBIC),
+            A.RandomRotate90(p=0.5),
+            A.Rotate(limit=15, interpolation=cv2.INTER_CUBIC, p=0.7),
+            A.HorizontalFlip(p=0.5),
+            A.VerticalFlip(p=0.3),
+            A.ShiftScaleRotate(
+                shift_limit=0.1, 
+                scale_limit=0.1, 
+                rotate_limit=15, 
+                interpolation=cv2.INTER_CUBIC,
+                p=0.6
+            ),
+            
+            # Elastic transform for medical images
+            A.ElasticTransform(
+                alpha=50, 
+                sigma=5, 
+                alpha_affine=5,
+                interpolation=cv2.INTER_CUBIC,
+                p=0.3
+            ),
+            
+            # Intensity transforms
+            A.RandomBrightnessContrast(
+                brightness_limit=0.2, 
+                contrast_limit=0.2, 
+                p=0.7
+            ),
+            A.RandomGamma(gamma_limit=(80, 120), p=0.5),
+            A.CLAHE(clip_limit=2.0, tile_grid_size=(8, 8), p=0.5),
+            
+            # Noise and blur
+            A.GaussNoise(var_limit=(10, 50), p=0.3),
+            A.GaussianBlur(blur_limit=(3, 5), p=0.3),
+            A.MotionBlur(blur_limit=3, p=0.2),
+            
+            # Grid distortion for medical realism
+            A.GridDistortion(num_steps=5, distort_limit=0.1, p=0.3),
+            
+            # Cutout for regularization
+            A.CoarseDropout(
+                max_holes=8, 
+                max_height=16, 
+                max_width=16, 
+                min_holes=1,
+                min_height=8, 
+                min_width=8,
+                fill_value=0, 
+                p=0.3
+            ),
+            
+            # Normalize and convert to tensor
+            A.Normalize(mean=[0.485], std=[0.229]),  # ImageNet grayscale stats
+            ToTensorV2()
+        ])
+    
+    else:
+        # Validation/Test transforms - minimal processing
+        transform = A.Compose([
+            A.Resize(height=image_size[0], width=image_size[1], interpolation=cv2.INTER_CUBIC),
+            A.Normalize(mean=[0.485], std=[0.229]),
+            ToTensorV2()
+        ])
+    
+    return transform
+
+
+def create_data_loaders(data_dir: str, 
+                       batch_size: int = 32, 
+                       train_split: float = 0.7,
+                       val_split: float = 0.15,
+                       test_split: float = 0.15,
+                       image_size: Tuple[int, int] = (224, 224),
+                       num_workers: int = 4,
+                       pin_memory: bool = True) -> Tuple[DataLoader, DataLoader, DataLoader]:
+    """
+    Create train, validation, and test data loaders with proper medical image handling
+    
+    Args:
+        data_dir: Root directory containing class folders
+        batch_size: Batch size for training
+        train_split: Proportion of data for training
+        val_split: Proportion of data for validation
+        test_split: Proportion of data for testing
+        image_size: Target image size
+        num_workers: Number of worker processes
+        pin_memory: Whether to pin memory for faster GPU transfer
+    
+    Returns:
+        Tuple of (train_loader, val_loader, test_loader)
+    """
+    
+    # Verify splits sum to 1
+    assert abs(train_split + val_split + test_split - 1.0) < 1e-6, "Splits must sum to 1.0"
+    
+    # Get transforms
+    train_transform = get_medical_transforms(image_size, 'train')
+    val_transform = get_medical_transforms(image_size, 'val')
+    test_transform = get_medical_transforms(image_size, 'test')
+    
+    # Create full dataset to get all samples
+    full_dataset = CTScanDataset(data_dir, transform=None, subset='full')
+    
+    # Split data indices
+    total_size = len(full_dataset)
+    train_size = int(train_split * total_size)
+    val_size = int(val_split * total_size)
+    test_size = total_size - train_size - val_size
+    
+    # Create random split
+    train_indices, temp_indices = train_test_split(
+        range(total_size), 
+        train_size=train_size, 
+        stratify=[full_dataset.samples[i][1] for i in range(total_size)],
+        random_state=42
+    )
+    
+    val_indices, test_indices = train_test_split(
+        temp_indices,
+        train_size=val_size,
+        stratify=[full_dataset.samples[i][1] for i in temp_indices],
+        random_state=42
+    )
+    
+    # Create subset datasets
+    train_samples = [full_dataset.samples[i] for i in train_indices]
+    val_samples = [full_dataset.samples[i] for i in val_indices]
+    test_samples = [full_dataset.samples[i] for i in test_indices]
+    
+    # Create datasets with appropriate transforms
+    train_dataset = CTScanDataset(data_dir, transform=train_transform, subset='train')
+    train_dataset.samples = train_samples
+    
+    val_dataset = CTScanDataset(data_dir, transform=val_transform, subset='val')
+    val_dataset.samples = val_samples
+    
+    test_dataset = CTScanDataset(data_dir, transform=test_transform, subset='test')
+    test_dataset.samples = test_samples
+    
+    # Create data loaders
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        drop_last=True
+    )
+    
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory
+    )
+    
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory
+    )
+    
+    logger.info(f"Data splits - Train: {len(train_dataset)}, Val: {len(val_dataset)}, Test: {len(test_dataset)}")
+    
+    return train_loader, val_loader, test_loader
+
+
+def visualize_batch(data_loader: DataLoader, num_samples: int = 8):
+    """Visualize a batch of CT scan images"""
+    # Get a batch
+    batch_images, batch_labels = next(iter(data_loader))
+    
+    # Setup the plot
+    fig, axes = plt.subplots(2, 4, figsize=(16, 8))
+    axes = axes.ravel()
+    
+    class_names = ['Normal', 'Benign', 'Malignant']
+    
+    for i in range(min(num_samples, len(batch_images))):
+        # Convert tensor to numpy and denormalize
+        img = batch_images[i].squeeze()
+        if len(img.shape) == 3 and img.shape[0] == 1:
+            img = img.squeeze(0)
+        
+        # Denormalize
+        img = img * 0.229 + 0.485
+        img = torch.clamp(img, 0, 1)
+        
+        axes[i].imshow(img, cmap='gray')
+        axes[i].set_title(f'Label: {class_names[batch_labels[i]]}')
+        axes[i].axis('off')
+    
+    plt.tight_layout()
+    plt.show()
+
+
+def get_class_weights(data_loader: DataLoader) -> torch.Tensor:
+    """Calculate class weights from data loader"""
+    class_counts = torch.zeros(3)
+    total_samples = 0
+    
+    for _, labels in data_loader:
+        for label in labels:
+            class_counts[label] += 1
+            total_samples += 1
+    
+    # Calculate weights
+    weights = total_samples / (3 * class_counts)
+    return weights
+
+
+if __name__ == "__main__":
+    DATA_DIR = r"E:\Python\Research\LungCancerFL\Federated_Learning_lung_cancer\DataSet\Lung-CT Scan"  # Replace with your path
+
+    train_loader, val_loader, test_loader = create_data_loaders(
+        data_dir=DATA_DIR,
+        batch_size=32,
+        image_size=(224, 224),
+        num_workers=0,     # Set 0 for Windows if multiprocess errors
+        pin_memory=False   # You can turn on if using GPU
+    )
+
+    visualize_batch(train_loader)
+    weights = get_class_weights(train_loader)
+    print("Class Weights:", weights)
