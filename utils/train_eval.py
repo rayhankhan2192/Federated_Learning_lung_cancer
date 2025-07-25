@@ -289,3 +289,48 @@ class ModelTrain:
         
         return test_metrics
         
+
+    def plot_confusion_matrix(self, y_true: List, y_pred: List, save_path: str = None):
+        """Plot and save confusion matrix"""
+        cm = confusion_matrix(y_true, y_pred)
+        
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                   xticklabels=self.metrics_calculator.class_names,
+                   yticklabels=self.metrics_calculator.class_names)
+        plt.title('Confusion Matrix')
+        plt.ylabel('True Label')
+        plt.xlabel('Predicted Label')
+        
+        if save_path is None:
+            save_path = os.path.join(self.save_dir, 'confusion_matrix.png')
+        
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.show()
+
+    def plot_training_history(self, metrics: List[str] = ['loss', 'accuracy'], save_path: str = None):
+        """Plot training history"""
+        fig, axes = plt.subplots(len(metrics), 1, figsize=(12, 4*len(metrics)))
+        if len(metrics) == 1:
+            axes = [axes]
+        
+        for i, metric in enumerate(metrics):
+            train_key = f'train_{metric}'
+            val_key = f'val_{metric}'
+            
+            if train_key in self.history and val_key in self.history:
+                axes[i].plot(self.history[train_key], label=f'Train {metric}')
+                axes[i].plot(self.history[val_key], label=f'Val {metric}')
+                axes[i].set_title(f'{metric.capitalize()} History')
+                axes[i].set_xlabel('Epoch')
+                axes[i].set_ylabel(metric.capitalize())
+                axes[i].legend()
+                axes[i].grid(True)
+        
+        plt.tight_layout()
+        
+        if save_path is None:
+            save_path = os.path.join(self.save_dir, 'training_history.png')
+        
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.show()
