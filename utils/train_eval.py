@@ -334,3 +334,82 @@ class ModelTrain:
         
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.show()
+
+
+    def save_checkpoint(self, epoch: int, train_metrics: Dict, val_metrics: Dict, is_best: bool = False):
+        """Save model checkpoint"""
+        checkpoint = {
+            'epoch': epoch,
+            'model_state_dict': self.model.state_dict(),
+            'train_metrics': train_metrics,
+            'val_metrics': val_metrics,
+        }
+        
+        if is_best:
+            checkpoint_path = os.path.join(self.save_dir, 'best_model.pth')
+        else:
+            checkpoint_path = os.path.join(self.save_dir, f'checkpoint_epoch_{epoch+1}.pth')
+        
+        torch.save(checkpoint, checkpoint_path)
+        logger.info(f"Checkpoint saved: {checkpoint_path}")
+    
+    def load_checkpoint(self, checkpoint_path: str) -> Dict:
+        """Load model checkpoint"""
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        logger.info(f"Checkpoint loaded: {checkpoint_path}")
+        return checkpoint
+    
+    def _log_epoch_metrics(self, epoch: int, train_metrics: Dict, val_metrics: Dict):
+        """Log metrics to tensorboard and console"""
+        
+        # Log to tensorboard
+        for key, value in train_metrics.items():
+            self.writer.add_scalar(f'Train/{key}', value, epoch)
+        for key, value in val_metrics.items():
+            self.writer.add_scalar(f'Val/{key}', value, epoch)
+        
+        # Log to console
+        logger.info(f"Epoch {epoch+1}:")
+        logger.info(f"  Train Loss: {train_metrics['loss']:.4f}, Acc: {train_metrics['accuracy']:.4f}")
+        logger.info(f"  Val Loss: {val_metrics['loss']:.4f}, Acc: {val_metrics['accuracy']:.4f}")
+        logger.info(f"  Val F1: {val_metrics['f1_macro']:.4f}")
+    
+    def _generate_classification_report(self, metrics: Dict):
+        """Generate and save detailed classification report"""
+        report = {
+            'Overall Metrics': {
+                'Accuracy': f"{metrics['accuracy']:.4f}",
+                'Macro F1': f"{metrics['f1_macro']:.4f}",
+                'Weighted F1': f"{metrics['f1_weighted']:.4f}",
+            },
+            'Per-Class Metrics': {}
+        }
+        
+        for class_name in self.metrics_calculator.class_names:
+            class_key = class_name.lower()
+            report['Per-Class Metrics'][class_name] = {
+                'Precision': f"{metrics.get(f'{class_key}_precision', 0):.4f}",
+                'Recall': f"{metrics.get(f'{class_key}_recall', 0):.4f}",
+                'F1-Score': f"{metrics.get(f'{class_key}_f1', 0):.4f}",
+                'Sensitivity': f"{metrics.get(f'{class_key}_sensitivity', 0):.4f}",
+                'Specificity': f"{metrics.get(f'{class_key}_specificity', 0):.4f}",
+            }
+        
+        # Save report
+        report_path = os.path.join(self.save_dir, 'classification_report.json')
+        with open(report_path, 'w') as f:
+            json.dump(report, f, indent=2)
+        
+        logger.info(f"Classification report saved: {report_path}")
+        
+        # Print summary
+        logger.info("=== CLASSIFICATION REPORT ===")
+        logger.info(f"Overall Accuracy: {metrics['accuracy']:.4f}")
+        logger.info(f"Macro F1-Score: {metrics['f1_macro']:.4f}")
+        
+        for class_name in self.metrics_calculator.class_names:
+            class_key = class_name.lower()
+            logger.info(f"{class_name}: F1={metrics.get(f'{class_key}_f1', 0):.4f}, "
+                       f"Precision={metrics.get(f'{class_key}_precision', 0):.4f}, "
+                       f"Recall={metrics.get(f'{class_key}_recall', 0):.4f}")
