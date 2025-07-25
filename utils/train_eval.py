@@ -413,3 +413,31 @@ class ModelTrain:
             logger.info(f"{class_name}: F1={metrics.get(f'{class_key}_f1', 0):.4f}, "
                        f"Precision={metrics.get(f'{class_key}_precision', 0):.4f}, "
                        f"Recall={metrics.get(f'{class_key}_recall', 0):.4f}")
+            
+
+def get_optimizer(model: nn.Module, optimizer_name: str = 'adam', 
+                 learning_rate: float = 0.001, weight_decay: float = 1e-4) -> optim.Optimizer:
+    """Get optimizer for training"""
+    if optimizer_name.lower() == 'adamw':
+        return optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    elif optimizer_name.lower() == 'adam':
+        return optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    elif optimizer_name.lower() == 'sgd':
+        return optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9, weight_decay=weight_decay)
+    else:
+        raise ValueError(f"Unsupported optimizer: {optimizer_name}")
+
+def get_scheduler(optimizer: optim.Optimizer, scheduler_name: str = 'plateau'):
+    """Get learning rate scheduler"""
+    if scheduler_name.lower() == 'plateau':
+        return optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=7)
+    elif scheduler_name.lower() == 'cosine':
+        return optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=50)
+    elif scheduler_name.lower() == 'step':
+        return optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
+    else:
+        return None
+
+
+
+
