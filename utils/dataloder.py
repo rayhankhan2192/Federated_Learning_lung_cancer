@@ -124,12 +124,12 @@ class CTScanDataset(Dataset):
         except Exception as e:
             logger.error(f"Error loading image {img_path}: {str(e)}")
             # Return a blank image as fallback
-            return np.zeros((512, 512), dtype=np.uint8)
+            return np.zeros((224, 224), dtype=np.uint8)
         
     def _apply_medical_preprocessing(self, image: np.ndarray) -> np.ndarray:
         """Apply medical-specific preprocessing to CT scans"""
         # Resize to standard size
-        image = cv2.resize(image, (512, 512), interpolation=cv2.INTER_CUBIC)
+        image = cv2.resize(image, (224, 224), interpolation=cv2.INTER_CUBIC)
         
         # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
@@ -229,7 +229,7 @@ def get_medical_transforms(image_size: Tuple[int, int] = (224, 224),
 
 
 def create_data_loaders(data_dir: str, 
-                       batch_size: int = 32, 
+                       batch_size: int = 8, 
                        train_split: float = 0.7,
                        val_split: float = 0.15,
                        test_split: float = 0.15,
