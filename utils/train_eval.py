@@ -175,3 +175,79 @@ class ModelTrain:
         )
         metrics['loss'] = avg_loss
         return metrics
+
+
+    def train(self, train_loader: DataLoader, val_loader: DataLoader, 
+              num_epochs: int = 50, learning_rate: float = 0.001,
+              weight_decay: float = 1e-4, class_weights: Optional[torch.Tensor] = None,
+              use_scheduler: bool = True, patience: int = 10) -> Dict:
+        """Complete training loop"""
+
+        optimizer = optim.Adam(self.model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+        if class_weights is not None:
+            criterion = nn.CrossEntropyLoss(weight=class_weights.to(self.device))       
+        else:
+            criterion = nn.CrossEntropyLoss()
+        
+        #Setup scheduler
+        if use_scheduler:
+            scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, mode='min', factor=0.5, patience=7, verbose=True
+            )
+        
+        # Early stopping
+        early_stopping = EarlyStopping(patience=patience, mode='min')
+        
+        best_val_loss = float('inf')
+        best_model_state = None
+        
+        logger.info("Starting training...")
+        start_time = time.time()
+
+        for epoch in range(num_epochs):
+            epoch_start = time.time()
+
+            # Training phase
+            train_metrics = self.train_epoch(train_loader, optimizer, criterion, epoch)
+
+            # Validation phase
+            val_metrics = self.validate_epoch(val_loader, criterion, epoch)
+
+            # Learning rate scheduling
+            if use_scheduler:
+                scheduler.step(val_metrics['loss'])
+
+            # Save best model
+            if val_metrics['loss'] < best_val_loss:
+                best_val_loss = val_metrics['loss']
+                best_model_state = self.model.state_dict().copy()
+                self.save_checkpoint(epoch, train_metrics, val_metrics, is_best=True)
+
+            # Log metrics
+            self._log_epoch_metrics(epoch, train_metrics, val_metrics)
+            
+            # Store history
+            for key, value in train_metrics.items():
+                self.history[f'train_{key}'].append(value)
+            for key, value in val_metrics.items():
+                self.history[f'val_{key}'].append(value)
+            
+            # Early stopping check
+            if early_stopping(val_metrics['loss']):
+                logger.info(f"Early stopping triggered at epoch {epoch+1}")
+                break
+            
+            epoch_time = time.time() - epoch_start
+            logger.info(f"Epoch {epoch+1}/{num_epochs} completed in {epoch_time:.2f}s")
+        
+        if best_model_state is not None:
+            self.model.load_state_dict(best_model_state)
+            logger.info("Loaded best model weights")
+
+        total_time = time.time() - start_time
+        logger.info(f"Training completed in {total_time:.2f}s")
+
+        # Close tensorboard writer
+        self.writer.close()
+        
+        return self.history
