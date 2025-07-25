@@ -109,3 +109,69 @@ class ModelMatrics:
                 logger.warning("Could not calculate AUC-ROC score")
         
         return metrics
+
+
+class ModelTrain:
+    """Main Training Engine for the model"""
+
+    def __init__(self, model: nn.modules, device: torch.device, save_dir: str = 'checkpoints', log_dir: str = 'logs'):
+        self.model = model
+        self.device = device
+        self.save_dir = save_dir
+        self.log_dir = log_dir
+
+        os.makedirs(save_dir, exist_ok=True)
+        os.makedirs(log_dir, exist_ok=True)
+
+        self.matrics_calculator = ModelMatrics()
+        self.writer = SummaryWriter(log_dir=log_dir)
+        self.history = defaultdict(list)
+
+    def train_epoch(self, train_loader: DataLoader, optimizer: optim.Optimizer, 
+                   criterion: nn.Module, epoch: int) -> Dict:
+        """Train for one epoch"""
+
+        self.model.train()
+        running_loss = 0.0
+        all_predictions = []
+        all_labels = []
+        all_probabilities = []
+
+        progress_bar = tqdm(train_loader, desc=f'Epoch {epoch+1} - Training')
+
+        for batch_idx, (data, target) in enumerate(progress_bar):
+            data, target = data.to(self.device), target.to(self.device)
+
+            optimizer.zero_grad()
+            outputs = self.model(data)  
+            loss = criterion(outputs, target)
+            loss.backward()
+
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+            optimizer.step()
+
+            # Statistics
+            running_loss += loss.item()
+            probabilities = torch.softmax(outputs, dim=1)
+            _, predicted = torch.max(outputs.data, 1)
+
+            all_predictions.extend(predicted.cpu().numpy())
+            all_labels.extend(target.cpu().numpy())
+            all_probabilities.extend(probabilities.cpu().detach().numpy())
+
+            # Update progress bar
+            progress_bar.set_postfix({'Loss': loss.item()})
+            
+            # Log to tensorboard
+            global_step = epoch * len(train_loader) + batch_idx
+            self.writer.add_scalar('Train/BatchLoss', loss.item(), global_step)
+
+        #Calculate epoch metrics
+        avg_loss = running_loss / (train_loader)
+        metrics = self.matrics_calculator.calculate_metrics(
+            np.array(all_labels), 
+            np.array(all_predictions), 
+            np.array(all_probabilities)
+        )
+        metrics['loss'] = avg_loss
+        return metrics
