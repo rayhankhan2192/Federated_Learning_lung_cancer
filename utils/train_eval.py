@@ -251,3 +251,41 @@ class ModelTrain:
         self.writer.close()
         
         return self.history
+    
+
+    def evaluate(self, test_loader: DataLoader) -> Dict:
+        """Comprehensive evaluation on test set"""
+        self.model.eval()
+
+        all_predictions = []
+        all_labels = []
+        all_probabilities = []
+
+        with torch.no_grad():
+            progress_bar = tqdm(test_loader, desc='Testing')
+            for data, target in progress_bar:
+                data, target = data.to(self.device), target.to(self.device)
+
+                outputs = self.model(data)
+                probabilities = torch.softmax(outputs, dim=1)
+                _, predicted = torch.max(outputs.data, 1)
+
+                all_predictions.extend(predicted.cpu().numpy())
+                all_labels.extend(target.cpu().numpy())
+                all_probabilities.extend(probabilities.cpu().detach().numpy())
+            
+        # Calculate comprehensive metrics
+        test_metrics = self.metrics_calculator.calculate_metrics(
+            np.array(all_labels), 
+            np.array(all_predictions),
+            np.array(all_probabilities)
+        )
+        
+        # Generate and save confusion matrix
+        self.plot_confusion_matrix(all_labels, all_predictions)
+        
+        # Generate classification report
+        self._generate_classification_report(test_metrics)
+        
+        return test_metrics
+        
