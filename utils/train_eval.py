@@ -28,27 +28,27 @@ class EarlyStopping:
         self.best_score = None
         self.early_stop = False
 
-        def __call__(self, score: float) -> bool:
-            if self.best_score in None:
+    def __call__(self, score: float) -> bool:
+        if self.best_score is None: 
+            self.best_score = score
+        elif self.mode == 'min':
+            if score < self.best_score - self.min_delta:
                 self.best_score = score
-            elif (self.mode == 'min'):
-                if score < self.best_score - self.min_delta:
-                    self.best_score = score
-                    self.counter = 0
-                else:
-                    self.counter += 1
+                self.counter = 0
             else:
-                if score > self.best_score + self.min_delta:
-                    self.best_score = score
-                    self.counter = 0
-                else:
-                    self.counter += 1
+                self.counter += 1
+        else:
+            if score > self.best_score + self.min_delta:
+                self.best_score = score
+                self.counter = 0
+            else:
+                self.counter += 1
 
-            if self.counter >= self.patience:
-                self.early_stop = True  
-            return self.early_stop
+        if self.counter >= self.patience:
+            self.early_stop = True  
+        return self.early_stop
         
-class ModelMatrics:
+class ModelMetrics: 
     """Class to compute and store model metrics"""
     def __init__(self, num_classes: int = 3):
         self.num_classes = num_classes
@@ -58,14 +58,12 @@ class ModelMatrics:
                       y_probs: Optional[np.ndarray] = None) -> Dict:
         """Calculate accuracy, precision, recall, F1 score, and AUC"""
         accuracy = accuracy_score(y_true, y_pred)
-        precision, recall, f1, _ = precision_recall_fscore_support(y_true, y_pred, average=None)
-        precision_macro, recall_macro, f1_macro, _ = precision_recall_fscore_support(y_true, y_pred, average='macro')
-        precision_weighted, recall_weighted, f1_weighted, _ = precision_recall_fscore_support(y_true, y_pred, average='weighted')
+        precision, recall, f1, _ = precision_recall_fscore_support(y_true, y_pred, average=None, zero_division=0)
+        precision_macro, recall_macro, f1_macro, _ = precision_recall_fscore_support(y_true, y_pred, average='macro', zero_division=0)
+        precision_weighted, recall_weighted, f1_weighted, _ = precision_recall_fscore_support(y_true, y_pred, average='weighted', zero_division=0)
+        
         metrics = {
             'accuracy': accuracy,
-            'precision': precision,
-            'recall': recall,
-            'f1_score': f1,
             'precision_macro': precision_macro,
             'recall_macro': recall_macro,
             'f1_macro': f1_macro,
@@ -76,22 +74,22 @@ class ModelMatrics:
 
         # Per-class metrics
         for i, class_name in enumerate(self.class_names):
-            metrics[f'{class_name.lower()}_precision'] = precision[i] if i < len(precision) else 0
-            metrics[f'{class_name.lower()}_recall'] = recall[i] if i < len(recall) else 0
-            metrics[f'{class_name.lower()}_f1'] = f1[i] if i < len(f1) else 0
+            metrics[f'{class_name.lower()}_precision'] = precision[i] if i < len(precision) else 0.0
+            metrics[f'{class_name.lower()}_recall'] = recall[i] if i < len(recall) else 0.0
+            metrics[f'{class_name.lower()}_f1'] = f1[i] if i < len(f1) else 0.0
         
-
-        if len(np.uniqe(y_true)) == 3:
+        # Medical-specific metrics
+        if len(np.unique(y_true)) == 3: 
             cm = confusion_matrix(y_true, y_pred)
             for i, class_name in enumerate(self.class_names):
                 if i < cm.shape[0]:
                     tp = cm[i, i]
                     fn = np.sum(cm[i, :]) - tp
                     fp = np.sum(cm[:, i]) - tp
-                    tn = np.sum(cm) - (tp + fn + fp)
+                    tn = np.sum(cm) - (tp + fn + fp) 
 
-                    sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0
-                    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
+                    sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+                    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
 
                     metrics[f'{class_name.lower()}_sensitivity'] = sensitivity  
                     metrics[f'{class_name.lower()}_specificity'] = specificity
@@ -111,10 +109,10 @@ class ModelMatrics:
         return metrics
 
 
-class ModelTrain:
+class ModelTrainer: 
     """Main Training Engine for the model"""
 
-    def __init__(self, model: nn.modules, device: torch.device, save_dir: str = 'checkpoints', log_dir: str = 'logs'):
+    def __init__(self, model: nn.Module, device: torch.device, save_dir: str = 'checkpoints', log_dir: str = 'logs'):  # Fixed: was nn.modules
         self.model = model
         self.device = device
         self.save_dir = save_dir
@@ -123,7 +121,7 @@ class ModelTrain:
         os.makedirs(save_dir, exist_ok=True)
         os.makedirs(log_dir, exist_ok=True)
 
-        self.matrics_calculator = ModelMatrics()
+        self.metrics_calculator = ModelMetrics() 
         self.writer = SummaryWriter(log_dir=log_dir)
         self.history = defaultdict(list)
 
@@ -166,9 +164,9 @@ class ModelTrain:
             global_step = epoch * len(train_loader) + batch_idx
             self.writer.add_scalar('Train/BatchLoss', loss.item(), global_step)
 
-        #Calculate epoch metrics
-        avg_loss = running_loss / (train_loader)
-        metrics = self.matrics_calculator.calculate_metrics(
+        # Calculate epoch metrics - Fixed: was running_loss / (train_loader)
+        avg_loss = running_loss / len(train_loader)
+        metrics = self.metrics_calculator.calculate_metrics( 
             np.array(all_labels), 
             np.array(all_predictions), 
             np.array(all_probabilities)
@@ -176,6 +174,44 @@ class ModelTrain:
         metrics['loss'] = avg_loss
         return metrics
 
+    def validate_epoch(self, val_loader: DataLoader, criterion: nn.Module, epoch: int) -> Dict:
+        """Validate for one epoch - This method was missing in your original code"""
+        self.model.eval()
+        
+        running_loss = 0.0
+        all_predictions = []
+        all_labels = []
+        all_probabilities = []
+        
+        with torch.no_grad():
+            progress_bar = tqdm(val_loader, desc=f'Epoch {epoch+1} - Validation')
+            
+            for data, target in progress_bar:
+                data, target = data.to(self.device), target.to(self.device)
+                
+                outputs = self.model(data)
+                loss = criterion(outputs, target)
+                
+                running_loss += loss.item()
+                probabilities = torch.softmax(outputs, dim=1)
+                _, predicted = torch.max(outputs.data, 1)
+                
+                all_predictions.extend(predicted.cpu().numpy())
+                all_labels.extend(target.cpu().numpy())
+                all_probabilities.extend(probabilities.cpu().detach().numpy())
+                
+                progress_bar.set_postfix({'Loss': loss.item()})
+        
+        # Calculate epoch metrics
+        avg_loss = running_loss / len(val_loader)
+        metrics = self.metrics_calculator.calculate_metrics(
+            np.array(all_labels), 
+            np.array(all_predictions),
+            np.array(all_probabilities)
+        )
+        metrics['loss'] = avg_loss
+        
+        return metrics
 
     def train(self, train_loader: DataLoader, val_loader: DataLoader, 
               num_epochs: int = 50, learning_rate: float = 0.001,
@@ -183,13 +219,15 @@ class ModelTrain:
               use_scheduler: bool = True, patience: int = 10) -> Dict:
         """Complete training loop"""
 
-        optimizer = optim.Adam(self.model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+        # Changed to AdamW for better performance
+        optimizer = optim.AdamW(self.model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+        
         if class_weights is not None:
             criterion = nn.CrossEntropyLoss(weight=class_weights.to(self.device))       
         else:
             criterion = nn.CrossEntropyLoss()
         
-        #Setup scheduler
+        # Setup scheduler
         if use_scheduler:
             scheduler = optim.lr_scheduler.ReduceLROnPlateau(
                 optimizer, mode='min', factor=0.5, patience=7, verbose=True
@@ -240,6 +278,7 @@ class ModelTrain:
             epoch_time = time.time() - epoch_start
             logger.info(f"Epoch {epoch+1}/{num_epochs} completed in {epoch_time:.2f}s")
         
+        # Load best model
         if best_model_state is not None:
             self.model.load_state_dict(best_model_state)
             logger.info("Loaded best model weights")
@@ -415,7 +454,7 @@ class ModelTrain:
                        f"Recall={metrics.get(f'{class_key}_recall', 0):.4f}")
             
 
-def get_optimizer(model: nn.Module, optimizer_name: str = 'adam', 
+def get_optimizer(model: nn.Module, optimizer_name: str = 'adam',
                  learning_rate: float = 0.001, weight_decay: float = 1e-4) -> optim.Optimizer:
     """Get optimizer for training"""
     if optimizer_name.lower() == 'adamw':
@@ -437,7 +476,3 @@ def get_scheduler(optimizer: optim.Optimizer, scheduler_name: str = 'plateau'):
         return optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
     else:
         return None
-
-
-
-
