@@ -30,9 +30,18 @@ class CTScanDataset(Dataset):
         self.transform = transform
         self.subset = subset
 
-        # Class mapping
-        self.class_to_idx = {'Bengin cases': 0, 'Malignant cases': 1, 'Normal cases': 2,}
-        self.idx_to_class = {v: k for k, v in self.class_to_idx.items()}
+        # # Class mapping
+        # self.class_to_idx = {'Bengin cases': 0, 'Malignant cases': 1, 'Normal cases': 2,}
+        # self.idx_to_class = {v: k for k, v in self.class_to_idx.items()}
+        # Dynamically generate class mapping from folder names
+        class_names = sorted([
+            d for d in os.listdir(data_dir) 
+            if os.path.isdir(os.path.join(data_dir, d))
+        ])
+
+        self.class_to_idx = {class_name: idx for idx, class_name in enumerate(class_names)}
+        self.idx_to_class = {idx: class_name for class_name, idx in self.class_to_idx.items()}
+
 
         # Load all image paths and labels
         self.samples = self._load_samples()
@@ -229,12 +238,12 @@ def get_medical_transforms(image_size: Tuple[int, int] = (224, 224),
 
 
 def create_data_loaders(data_dir: str, 
-                       batch_size: int = 8, 
-                       train_split: float = 0.7,
-                       val_split: float = 0.15,
-                       test_split: float = 0.15,
+                       batch_size: int = 32, 
+                       train_split: float = 0.8,
+                       val_split: float = 0.1,
+                       test_split: float = 0.1,
                        image_size: Tuple[int, int] = (224, 224),
-                       num_workers: int = 4,
+                       num_workers: int = 1,
                        pin_memory: bool = True) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """
     Create train, validation, and test data loaders with proper medical image handling
