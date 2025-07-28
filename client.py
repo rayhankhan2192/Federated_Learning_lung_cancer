@@ -11,7 +11,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 # Import custom modules
-from models.resnet_model import get_model, FocalLoss, LabelSmoothingLoss
+from models.model_factory import get_model, FocalLoss, LabelSmoothingLoss
 from utils.dataloder import create_data_loaders, get_class_weights
 from utils.train_eval import ModelTrainer, ModelMetrics, get_optimizer
 
@@ -197,3 +197,74 @@ class MedicalFLClient(fl.client.NumPyClient):
         logger.info(f"  - Val Loss: {val_metrics['loss']:.4f}, Val Acc: {val_metrics['accuracy']:.4f}")
         
         return self.get_parameters(), len(self.train_loader.dataset), metrics
+    
+    def evaluate(self, parameters: List[np.ndarray], config: Dict) -> Tuple[float, int, Dict]:
+        """
+        Evaluate model on local test set
+        
+        Args:
+            parameters: Global model parameters from server
+            config: Evaluation configuration from server
+            
+        Returns:
+            Tuple of (loss, num_examples, metrics)
+        """
+        logger.info(f"Client {self.client_id}: Starting evaluation")
+        
+        # Set global parameters
+        self.set_parameters(parameters)
+        
+        # Evaluate on test set
+        test_metrics = self.trainer.evaluate(self.test_loader)
+        
+        logger.info(f"Client {self.client_id}: Evaluation completed")
+        logger.info(f"  - Test Accuracy: {test_metrics['accuracy']:.4f}")
+        logger.info(f"  - Test F1 (Macro): {test_metrics['f1_macro']:.4f}")
+        
+        return (test_metrics.get("loss", 0.0), 
+                len(self.test_loader.dataset), 
+                test_metrics)
+    
+    def _evaluate_local(self) -> Dict:
+        """
+        Evaluate model on local validation set using ModelMetrics
+        
+        Returns:
+            Dictionary of evaluation metrics
+        """
+        self.model.eval()
+        
+        total_loss = 0.0
+        all_predictions = []
+        all_labels = []
+        all_probabilities = []
+        
+        criterion = nn.CrossEntropyLoss()
+        metrics_calculator = ModelMetrics()
+        
+        with torch.no_grad():
+            for data, target in self.val_loader:
+                data, target = data.to(self.device), target.to(self.device)
+                
+                outputs = self.model(data)
+                loss = criterion(outputs, target)
+                
+                total_loss += loss.item()
+                probabilities = torch.softmax(outputs, dim=1)
+                _, predicted = torch.max(outputs.data, 1)
+                
+                all_predictions.extend(predicted.cpu().numpy())
+                all_labels.extend(target.cpu().numpy())
+                all_probabilities.extend(probabilities.cpu().detach().numpy())
+        
+        avg_loss = total_loss / len(self.val_loader)
+        
+        # Calculate comprehensive metrics using ModelMetrics
+        metrics = metrics_calculator.calculate_metrics(
+            np.array(all_labels),
+            np.array(all_predictions),
+            np.array(all_probabilities)
+        )
+        metrics['loss'] = avg_loss
+        
+        return metrics
