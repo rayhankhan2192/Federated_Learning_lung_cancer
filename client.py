@@ -292,7 +292,47 @@ def create_client(client_id: int, data_dir: str, model_name: str = "customcnn") 
         model_name=model_name,
         num_classes=3,
         batch_size=32,
-        local_epochs=30
+        local_epochs=50
     )
     
     return client
+
+def main():
+    """Main function to run FL client"""
+    parser = argparse.ArgumentParser(description="Federated Learning Client for Medical Imaging")
+    parser.add_argument("--client-id", type=int, default=1, help="Client ID")
+    parser.add_argument("--data-dir", type=str, required=True, help="Path to client data directory")
+    parser.add_argument("--server-address", type=str, default="localhost:8080", help="FL server address")
+    parser.add_argument("--model", type=str, default="resnet18", choices=["resnet18", "resnet50", "customcnn"], help="Model architecture")
+    parser.add_argument("--train-local", action="store_true", help="Run local training only (no FL server)")
+
+    args = parser.parse_args()
+
+    if not os.path.exists(args.data_dir):
+        raise ValueError(f"Data directory not found: {args.data_dir}")
+
+    client = create_client(args.client_id, args.data_dir, args.model)
+
+    if args.train_local:
+        #Local training only
+        logger.info("Running standalone local training (no FL server)")
+        # client.fit(client.get_parameters(), config={})
+        updated_params, num_examples, train_metrics = client.fit(client.get_parameters(), config={})
+        
+        # Run evaluation on test set
+        test_loss, test_examples, test_metrics = client.evaluate(updated_params, config={})
+        
+        logger.info("Local training and evaluation completed:")
+        logger.info(f"  - Final train metrics: {train_metrics}")
+        logger.info(f"  - Final test metrics: {test_metrics}")
+        return
+
+    #Federated client
+    logger.info(f"Starting FL client {args.client_id} connecting to {args.server_address}")
+    fl.client.start_client(
+        server_address=args.server_address,
+        client=client.to_client()
+    )
+
+if __name__ == "__main__":
+    main()
