@@ -268,3 +268,31 @@ class MedicalFLClient(fl.client.NumPyClient):
         metrics['loss'] = avg_loss
         
         return metrics
+
+def create_client(client_id: int, data_dir: str, model_name: str = "customcnn") -> MedicalFLClient:
+    """
+    Factory function to create FL client
+    
+    Args:
+        client_id: Unique client identifier
+        data_dir: Path to client's data directory
+        model_name: Model architecture name
+        
+    Returns:
+        Initialized MedicalFLClient
+    """
+    # Setup device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    logger.info(f"Using device: {device}")
+    
+    client = MedicalFLClient(
+        client_id=client_id,
+        data_dir=data_dir,
+        device=device,
+        model_name=model_name,
+        num_classes=3,
+        batch_size=32,
+        local_epochs=30
+    )
+    
+    return client
