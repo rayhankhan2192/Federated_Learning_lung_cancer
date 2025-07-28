@@ -25,7 +25,7 @@ class MedicalFLClient(fl.client.NumPyClient):
     """
     
     def __init__(self, client_id: int, data_dir: str, device: torch.device,
-                 model_name: str = "resnet50", num_classes: int = 3,
+                 model_name: str = "customcnn", num_classes: int = 3,
                  batch_size: int = 32, local_epochs: int = 8):
         """
         Initialize FL client
@@ -59,7 +59,7 @@ class MedicalFLClient(fl.client.NumPyClient):
             val_split=0.1,
             test_split=0.1,
             image_size=(224, 224),
-            num_workers=1
+            num_workers=3
         )
         
         # Calculate class weights for handling imbalanced data
@@ -285,6 +285,7 @@ def create_client(client_id: int, data_dir: str, model_name: str = "customcnn") 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
     
+    # Create client
     client = MedicalFLClient(
         client_id=client_id,
         data_dir=data_dir,
@@ -296,6 +297,30 @@ def create_client(client_id: int, data_dir: str, model_name: str = "customcnn") 
     )
     
     return client
+
+# def main():
+#     """Main function to run FL client"""
+#     parser = argparse.ArgumentParser(description="Federated Learning Client for Medical Imaging")
+#     parser.add_argument("--client-id", type=int, default=1, help="Client ID")
+#     parser.add_argument("--data-dir", type=str, required=True, help="Path to client data directory")
+#     parser.add_argument("--server-address", type=str, default="localhost:8080", help="FL server address")
+#     parser.add_argument("--model", type=str, default="resnet18", choices=["resnet18", "resnet50"], help="Model architecture")
+    
+#     args = parser.parse_args()
+    
+#     # Validate data directory
+#     if not os.path.exists(args.data_dir):
+#         raise ValueError(f"Data directory not found: {args.data_dir}")
+    
+#     # Create client
+#     client = create_client(args.client_id, args.data_dir, args.model)
+    
+#     # Start FL client
+#     logger.info(f"Starting FL client {args.client_id} connecting to {args.server_address}")
+#     fl.client.start_numpy_client(
+#         server_address=args.server_address,
+#         client=client
+#     )
 
 def main():
     """Main function to run FL client"""
@@ -317,6 +342,7 @@ def main():
         #Local training only
         logger.info("Running standalone local training (no FL server)")
         # client.fit(client.get_parameters(), config={})
+
         updated_params, num_examples, train_metrics = client.fit(client.get_parameters(), config={})
         
         # Run evaluation on test set
