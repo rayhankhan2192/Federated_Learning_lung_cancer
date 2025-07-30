@@ -1,0 +1,30 @@
+{
+  "Overall Metrics": {
+    "Accuracy": "0.7607",
+    "Macro F1": "0.7248",
+    "Weighted F1": "0.7250"
+  },
+  "Per-Class Metrics": {
+    "Bengin cases": {
+      "Precision": "0.9655",
+      "Recall": "0.2800",
+      "F1-Score": "0.4341",
+      "Sensitivity": "0.2800",
+      "Specificity": "0.9951"
+    },
+    "Malignant cases": {
+      "Precision": "0.5909",
+      "Recall": "0.9905",
+      "F1-Score": "0.7402",
+      "Sensitivity": "0.9905",
+      "Specificity": "0.6400"
+    },
+    "Normal cases": {
+      "Precision": "1.0000",
+      "Recall": "1.0000",
+      "F1-Score": "1.0000",
+      "Sensitivity": "1.0000",
+      "Specificity": "1.0000"
+    }
+  }
+}

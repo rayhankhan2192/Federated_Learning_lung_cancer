@@ -105,98 +105,75 @@ class MedicalFLClient(fl.client.NumPyClient):
     
     def fit(self, parameters: List[np.ndarray], config: Dict) -> Tuple[List[np.ndarray], int, Dict]:
         """
-        Train model locally using federated learning round configuration
-        
+        Train model locally using federated learning round configuration.
+
         Args:
             parameters: Global model parameters from server
             config: Training configuration from server
-            
+
         Returns:
             Tuple of (updated_parameters, num_examples, metrics)
         """
         logger.info(f"Client {self.client_id}: Starting local training round")
-        
-        # Set global parameters
+
+        #Set global weights
         self.set_parameters(parameters)
-        
-        # Get training configuration from server
+
+        #Config extraction
         local_epochs = config.get("local_epochs", self.local_epochs)
         learning_rate = config.get("learning_rate", self.learning_rate)
+        weight_decay = config.get("weight_decay", 1e-4)
         loss_function = config.get("loss_function", "crossentropy")
-        
-        # Setup optimizer
-        optimizer = get_optimizer(self.model, "adam", learning_rate, self.weight_decay)
-        
-        # Setup loss function
+        optimizer_name = config.get("optimizer", "adamw")
+        scheduler_name = config.get("scheduler", "plateau")
+        use_scheduler = config.get("use_scheduler", True)
+
+        #Loss Function
         if loss_function == "focal":
             criterion = FocalLoss(alpha=1.0, gamma=2.0)
         elif loss_function == "label_smoothing":
             criterion = LabelSmoothingLoss(num_classes=self.num_classes, smoothing=0.1)
         else:
             criterion = nn.CrossEntropyLoss(weight=self.class_weights.to(self.device))
-        
-        # Local training
-        self.model.train()
-        total_loss = 0.0
-        total_samples = 0
-        correct_predictions = 0
-        
-        for epoch in range(local_epochs):
-            epoch_loss = 0.0
-            epoch_samples = 0
-            epoch_correct = 0
-            
-            for batch_idx, (data, target) in enumerate(self.train_loader):
-                data, target = data.to(self.device), target.to(self.device)
-                
-                optimizer.zero_grad()
-                outputs = self.model(data)
-                loss = criterion(outputs, target)
-                loss.backward()
-                
-                # Gradient clipping for stability
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                
-                optimizer.step()
-                
-                # Statistics
-                epoch_loss += loss.item()
-                epoch_samples += data.size(0)
-                _, predicted = torch.max(outputs.data, 1)
-                epoch_correct += (predicted == target).sum().item()
-            
-            epoch_accuracy = epoch_correct / epoch_samples
-            avg_epoch_loss = epoch_loss / len(self.train_loader)
-            
-            logger.info(f"Client {self.client_id} - Epoch {epoch+1}/{local_epochs}: "
-                       f"Loss: {avg_epoch_loss:.4f}, Accuracy: {epoch_accuracy:.4f}")
-            
-            total_loss += epoch_loss
-            total_samples += epoch_samples
-            correct_predictions += epoch_correct
-        
-        # Calculate final metrics
-        avg_loss = total_loss / (local_epochs * len(self.train_loader))
-        accuracy = correct_predictions / total_samples
-        
-        # Validate on local validation set
-        val_metrics = self._evaluate_local()
-        
-        # Prepare metrics to send to server
+
+        # Call ModelTrainer.train
+        train_history = self.trainer.train(
+            train_loader=self.train_loader,
+            val_loader=self.val_loader,
+            num_epochs=local_epochs,
+            learning_rate=learning_rate,
+            weight_decay=weight_decay,
+            class_weights=self.class_weights,
+            use_scheduler=use_scheduler,
+            patience=10,
+            criterion=criterion,
+            optimizer_name=optimizer_name,
+            scheduler_name=scheduler_name
+        )
+
+        # === Evaluation after training
+        test_metrics = self.trainer.evaluate(self.test_loader)
+
+        # === Save model (optional)
+        model_path = f"client_{self.client_id}_best_model.pth"
+        torch.save(self.model.state_dict(), model_path)
+        logger.info(f"Client {self.client_id}: Best model saved to {model_path}")
+
+        # === Final Metrics
         metrics = {
-            "train_loss": avg_loss,
-            "train_accuracy": accuracy,
-            "val_loss": val_metrics["loss"],
-            "val_accuracy": val_metrics["accuracy"],
-            "val_f1": val_metrics["f1_macro"],
+            "train_loss": train_history["train_loss"][-1],
+            "train_accuracy": train_history["train_accuracy"][-1],
+            "val_loss": train_history["val_loss"][-1],
+            "val_accuracy": train_history["val_accuracy"][-1],
+            "val_f1": train_history["val_f1_macro"][-1],
+            "test_accuracy": test_metrics["accuracy"],
+            "test_f1": test_metrics["f1_macro"],
             "num_examples": len(self.train_loader.dataset)
         }
-        
+
         logger.info(f"Client {self.client_id}: Local training completed")
-        logger.info(f"  - Train Loss: {avg_loss:.4f}, Train Acc: {accuracy:.4f}")
-        logger.info(f"  - Val Loss: {val_metrics['loss']:.4f}, Val Acc: {val_metrics['accuracy']:.4f}")
-        
         return self.get_parameters(), len(self.train_loader.dataset), metrics
+
     
     def evaluate(self, parameters: List[np.ndarray], config: Dict) -> Tuple[float, int, Dict]:
         """

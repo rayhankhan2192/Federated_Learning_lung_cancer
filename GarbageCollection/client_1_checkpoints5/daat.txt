@@ -1,0 +1,6 @@
+INFO:__main__:Client 1: Local training completed
+INFO:__main__:  - Train Loss: 0.4773, Train Acc: 0.7389
+INFO:__main__:  - Val Loss: 0.3389, Val Acc: 0.8426
+INFO:__main__:Client 1: Starting evaluation
+
+used 50 EPOCH with 2nd CNN version
