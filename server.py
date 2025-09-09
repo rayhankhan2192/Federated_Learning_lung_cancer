@@ -69,3 +69,89 @@ def fit_config(server_round: int)->Dict[str, fl.common.Scalar]:
         f"epochs: {config['local_epochs']}, lr: {config['learning_rate']}, loss: {config['loss_function']}"
     )
     return config
+
+
+def evaluate_config(server_round: int)->Dict[str, fl.common.Scalar]:
+    return {"server_round": server_round}
+
+def wighted_average(metrics: List[Tuple[int, Dict]])->Dict:
+    """Weighted average across client metrics dictionaries."""
+    logger.info(f"Aggregating metrics from {len(metrics)} clients")
+    if not metrics:
+        return {}
+    total_samples = sum(num_samples for num_samples, _ in metrics)
+    if total_samples == 0:
+        return {}
+    aggregated_metrics: Dict[str, float] = {}
+    for num_samples, client_metrics in metrics:
+        weight = num_samples / total_samples
+        for key, value in client_metrics.items():
+            if isinstance(value, (int, float, np.integer, np.floating)):
+                aggregated_metrics[key] = aggregated_metrics.get(key, 0.0) + weight * float(value)
+    return aggregated_metrics
+
+class FedaratedStrategy(fl.server.strategy.FedAvg):
+    """
+    FedAvg strategy extended with:
+      - history tracking
+      - best/last global checkpoint saving
+      - detailed round logging & plots
+    """
+
+    def __init__(
+        self,
+        model_name: str,
+        num_classes: int,
+        fraction_fit: float = 0.1,
+        fraction_evaluate: float = 0.1,
+        min_fit_clients: int = 2,
+        min_evaluate_clients: int = 2,
+        min_available_clients: int = 2,
+        accept_failures: bool = True,
+        initial_parameters: Optional[fl.common.Parameters] = None,
+
+    ):
+        super().__init__(
+            fraction_fit=fraction_fit,
+            fraction_evaluate=fraction_evaluate,
+            min_fit_clients=min_fit_clients,
+            min_evaluate_clients=min_evaluate_clients,
+            min_available_clients=min_available_clients,
+            accept_failures=accept_failures,
+            initial_parameters=initial_parameters,
+            evaluate_metrics_aggregation_fn=wighted_average,
+        )
+        self.model_name = model_name
+        self.num_classes = num_classes
+        self.history: Dict[str, List] = {
+            "round": [],
+            "train_loss": [],
+            "train_accuracy": [],
+            "train_f1": [],
+            "val_loss": [],
+            "val_accuracy": [],
+            "val_f1": [],
+            "test_loss": [],
+            "test_accuracy": [],
+            "test_f1": [],
+            "num_Clients": [],
+            "client_data_size": [],
+            "aggregation_time": [],
+        }
+        self.best_accuracy = 0.0
+        self.best_f1 = 0.0
+        self.best_round = 0
+        self.best_parameters: Optional[fl.common.Parameters] = None
+        self.last_parameters: Optional[fl.common.Parameters] = None
+
+        self.connected_clients = set()
+        self.client_metrics_history = {}
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.results_dir = f"fl_results_{ts}"
+        os.makedirs(self.results_dir, exist_ok=True)
+        self._save_strategy_config()
+
+        logger.info("✅ FL Strategy initialized")
+        logger.info(f"   → results_dir: {self.results_dir}")
+        logger.info(f"   → model={self.model_name}, num_classes={self.num_classes}")
+
