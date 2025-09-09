@@ -13,7 +13,12 @@ import sys
 import os
 import json
 import time
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
 from models.model_factory import get_model
+
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("FL-Server")
@@ -453,3 +458,77 @@ class MedicalFLStrategy(fl.server.strategy.FedAvg):
         except Exception as exc:
             logger.error(f"Failed to save last global model: {exc}")
 
+    def save_intermediate_results(self, rnd: int):
+        try:
+            with open(os.path.join(self.results_dir, f"history_round_{rnd}.json"), "w") as f:
+                json.dump(self.history, f, indent=2)
+            with open(os.path.join(self.results_dir, f"client_metrics_round_{rnd}.json"), "w") as f:
+                json.dump(self.client_metrics_history, f, indent=2)
+            self.plot_training_curves(save_suffix=f"_round_{rnd}")
+            logger.info(f"Intermediate results saved for round {rnd}")
+        except Exception as e:
+            logger.error(f"Failed to save intermediate results: {e}")
+
+    def save_final_results(self):
+        try:
+            with open(os.path.join(self.results_dir, "final_training_history.json"), "w") as f:
+                json.dump(self.history, f, indent=2)
+            with open(os.path.join(self.results_dir, "final_client_metrics.json"), "w") as f:
+                json.dump(self.client_metrics_history, f, indent=2)
+            self.plot_training_curves(save_suffix="_final")
+            self._generate_final_report()
+            logger.info(f"Final results saved in {self.results_dir}")
+        except Exception as e:
+            logger.error(f"Failed to save final results: {e}")
+
+    def plot_training_curves(self, save_suffix: str = ""):
+        if not self.history["round"]:
+            return
+        rounds = self.history["round"]
+        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+
+        # Loss
+        axes[0, 0].plot(rounds, self.history["train_loss"], label="Train Loss", linewidth=2, marker="o")
+        axes[0, 0].plot(rounds, self.history["val_loss"], label="Val Loss", linewidth=2, marker="s")
+        if self.history["test_loss"]:
+            axes[0, 0].plot(rounds, self.history["test_loss"], label="Test Loss", linewidth=2, marker="^")
+        axes[0, 0].set_title("Loss")
+
+        # Acc
+        axes[0, 1].plot(rounds, self.history["train_accuracy"], label="Train Acc", linewidth=2, marker="o")
+        axes[0, 1].plot(rounds, self.history["val_accuracy"], label="Val Acc", linewidth=2, marker="s")
+        if self.history["test_accuracy"]:
+            axes[0, 1].plot(rounds, self.history["test_accuracy"], label="Test Acc", linewidth=2, marker="^")
+        axes[0, 1].set_title("Accuracy")
+
+        # F1
+        axes[0, 2].plot(rounds, self.history["train_f1"], label="Train F1", linewidth=2, marker="o")
+        axes[0, 2].plot(rounds, self.history["val_f1"], label="Val F1", linewidth=2, marker="s")
+        if self.history["test_f1"]:
+            axes[0, 2].plot(rounds, self.history["test_f1"], label="Test F1", linewidth=2, marker="^")
+        axes[0, 2].set_title("F1-Score")
+
+        # Clients per round
+        axes[1, 0].bar(rounds, self.history["num_clients"], alpha=0.8)
+        axes[1, 0].set_title("Clients per Round")
+
+        # Aggregation time
+        if self.history["aggregation_time"]:
+            axes[1, 1].plot(rounds, self.history["aggregation_time"], linewidth=2, marker="d")
+            axes[1, 1].set_title("Aggregation Time (s)")
+
+        # Data distribution (latest round)
+        if self.history["client_data_sizes"]:
+            latest = self.history["client_data_sizes"][-1]
+            labels = [f"C{i+1}" for i in range(len(latest))]
+            axes[1, 2].pie(latest, labels=labels, autopct="%1.1f%%", startangle=90)
+            axes[1, 2].set_title("Data Distribution (latest)")
+
+        for ax in axes.ravel():
+            ax.grid(True, alpha=0.3)
+            ax.legend(loc="best")
+        plt.tight_layout()
+        out = os.path.join(self.results_dir, f"training_curves{save_suffix}.png")
+        plt.savefig(out, dpi=300, bbox_inches="tight")
+        plt.close()
+        logger.info(f"📊 Saved plot → {out}")
