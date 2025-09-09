@@ -279,7 +279,7 @@ class MedicalFLStrategy(fl.server.strategy.FedAvg):
         results: List[Tuple[fl.server.client_proxy.ClientProxy, fl.common.EvaluateRes]],
         failures: List[Union[Tuple[fl.server.client_proxy.ClientProxy, fl.common.EvaluateRes], BaseException]],
     ) -> Tuple[Optional[float], Dict[str, fl.common.Scalar]]:
-        logger.info(f"📊 Round {server_round}: aggregating evaluation results "
+        logger.info(f"Round {server_round}: aggregating evaluation results "
                     f"(success={len(results)} fail={len(failures)})")
         if not results:
             return None, {}
@@ -291,3 +291,76 @@ class MedicalFLStrategy(fl.server.strategy.FedAvg):
         logger.info(f"   Test: loss={test['test_loss_avg']:.4f} "
                     f"acc={test['test_accuracy_avg']:.4f} f1={test['test_f1_avg']:.4f}")
         return test["test_loss_avg"], test
+    
+
+    def _calculate_fit_metrics(
+        self, results: List[Tuple[fl.server.client_proxy.ClientProxy, fl.common.FitRes]]) -> Dict:
+        """Calculate weighted average training/validation metrics from all clients."""
+
+        total_examples = sum(fit_res.num_examples for _, fit_res in results) or 1
+        metric_keys = ["train_loss", "train_accuracy", "train_f1",
+                    "val_loss", "val_accuracy", "val_f1"]
+
+        weighted_sums = {key: 0.0 for key in metric_keys}
+        client_data_sizes = []
+        client_metrics_list = []
+
+        for client_proxy, fit_res in results:
+            weight = fit_res.num_examples / total_examples
+            client_data_sizes.append(fit_res.num_examples)
+
+            metrics_for_client = {}
+            for key in metric_keys:
+                value = fit_res.metrics.get(key, 0.0) if fit_res.metrics else 0.0
+                weighted_sums[key] += float(value) * weight
+                metrics_for_client[key] = float(value)
+
+            client_metrics_list.append({
+                "client_id": client_proxy.cid,
+                "num_examples": fit_res.num_examples,
+                "metrics": metrics_for_client,
+            })
+
+        # Save per-round client metrics
+        current_round = len(self.history["round"]) + 1
+        self.client_metrics_history[current_round] = client_metrics_list
+
+        return {
+            "train_loss_avg": weighted_sums["train_loss"],
+            "train_accuracy_avg": weighted_sums["train_accuracy"],
+            "train_f1_avg": weighted_sums["train_f1"],
+            "val_loss_avg": weighted_sums["val_loss"],
+            "val_accuracy_avg": weighted_sums["val_accuracy"],
+            "val_f1_avg": weighted_sums["val_f1"],
+            "total_examples": total_examples,
+            "client_data_sizes": client_data_sizes,
+            "num_participating_clients": len(results),
+        }
+    
+    def _calculate_eval_metrics(
+        self, results: List[Tuple[fl.server.client_proxy.ClientProxy, fl.common.EvaluateRes]]
+    ) -> Dict:
+        """Calculate weighted average evaluation metrics from all clients."""
+
+        total_examples = sum(eval_res.num_examples for _, eval_res in results) or 1
+
+        weighted_loss = 0.0
+        weighted_accuracy = 0.0
+        weighted_f1 = 0.0
+
+        for _, eval_res in results:
+            weight = eval_res.num_examples / total_examples
+            weighted_loss += float(eval_res.loss or 0.0) * weight
+
+            if eval_res.metrics:
+                weighted_accuracy += float(eval_res.metrics.get("accuracy", 0.0)) * weight
+                weighted_f1 += float(eval_res.metrics.get("f1_macro", 0.0)) * weight
+
+        return {
+            "test_loss_avg": weighted_loss,
+            "test_accuracy_avg": weighted_accuracy,
+            "test_f1_avg": weighted_f1,
+            "total_test_examples": total_examples,
+            "num_eval_clients": len(results),
+        }
+
