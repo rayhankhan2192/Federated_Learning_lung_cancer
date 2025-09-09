@@ -38,3 +38,34 @@ def get_init_parameters(model_name: str, num_classes: int) -> fl.common.Paramete
         import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
         return None
+
+def fit_config(server_round: int)->Dict[str, fl.common.Scalar]:
+    """Per-round training config broadcast to clients."""
+    config = {
+        "serever_round": server_round,
+        "local_epochs": 5,
+        "learning_rate": 1e-3,
+        "weight_decay": 1e-4,
+        "loss_function": "cross_entropy",
+        "optimizer": "adamw",
+        "scheduler": "plateau",
+        "use_scheduler": True,
+        "batch_size": 32,
+    }
+    if server_round > 20:
+        config["loss_function"] = "focal"
+    if 32 <= server_round <= 60:
+        config["learning_rate"] = 5e-4
+        config["local_epochs"] = 4
+    elif 61 <= server_round <= 80:
+        config["learning_rate"] = 2e-4
+        config["local_epochs"] = 3
+    elif server_round > 80:
+        config["learning_rate"] = 1e-4
+        config["local_epochs"] = 2
+    
+    logger.info(
+        f"Round {server_round} training config: "
+        f"epochs: {config['local_epochs']}, lr: {config['learning_rate']}, loss: {config['loss_function']}"
+    )
+    return config
