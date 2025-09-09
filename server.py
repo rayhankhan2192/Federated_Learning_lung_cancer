@@ -51,7 +51,7 @@ def fit_config(server_round: int)->Dict[str, fl.common.Scalar]:
     """Per-round training config broadcast to clients."""
     config = {
         "serever_round": server_round,
-        "local_epochs": 5,
+        "local_epochs": 2,
         "learning_rate": 1e-3,
         "weight_decay": 1e-4,
         "loss_function": "cross_entropy",
@@ -82,7 +82,7 @@ def fit_config(server_round: int)->Dict[str, fl.common.Scalar]:
 def evaluate_config(server_round: int)->Dict[str, fl.common.Scalar]:
     return {"server_round": server_round}
 
-def wighted_average(metrics: List[Tuple[int, Dict]])->Dict:
+def weighted_average(metrics: List[Tuple[int, Dict]])->Dict:
     """Weighted average across client metrics dictionaries."""
     logger.info(f"Aggregating metrics from {len(metrics)} clients")
     if not metrics:
@@ -532,3 +532,110 @@ class MedicalFLStrategy(fl.server.strategy.FedAvg):
         plt.savefig(out, dpi=300, bbox_inches="tight")
         plt.close()
         logger.info(f"📊 Saved plot → {out}")
+
+
+def create_server_strategy(
+    *,
+    min_clients: int,
+    fraction_fit: float,
+    fraction_evaluate: float,
+    model_name: str = "customcnn",
+    num_classes: int,
+) -> MedicalFLStrategy:
+    """Create FL server strategy with initial model parameters."""
+    
+    # Get initial parameters with proper model loading
+    initial_parameters = get_init_parameters(model_name, num_classes)
+    
+    if initial_parameters is None:
+        raise RuntimeError("Failed to initialize model parameters")
+    
+    return MedicalFLStrategy(
+        model_name=model_name,
+        num_classes=num_classes,
+        fraction_fit=fraction_fit,
+        fraction_evaluate=fraction_evaluate,
+        min_fit_clients=min_clients,
+        min_evaluate_clients=1,
+        min_available_clients=min_clients,
+        on_fit_config_fn=fit_config,
+        on_evaluate_config_fn=evaluate_config,
+        initial_parameters=initial_parameters,
+        fit_metrics_aggregation_fn=weighted_average,
+        evaluate_metrics_aggregation_fn=weighted_average,
+    )
+
+def main():
+    parser = argparse.ArgumentParser("Federated Learning Server (Medical)")
+    parser.add_argument("--host", type=str, default="0.0.0.0", help="Bind address")
+    parser.add_argument("--port", type=int, default=8080, help="Port")
+    parser.add_argument("--rounds", type=int, default=3, help="FL rounds")
+    parser.add_argument("--min-clients", type=int, default=1, help="Minimum clients per round")
+    parser.add_argument("--fraction-fit", type=float, default=1.0, help="Fraction of clients to train each round")
+    parser.add_argument("--fraction-evaluate", type=float, default=1.0, help="Fraction of clients to evaluate each round")
+    parser.add_argument("--model", type=str, default="customcnn", choices=["resnet18", "resnet50", "customcnn"])
+    parser.add_argument("--num-classes", type=int, default=3)
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    args = parser.parse_args()
+
+    # Configure logging based on debug flag
+    log_level = logging.DEBUG if args.debug else logging.INFO
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s"
+    )
+
+    logger.info("🚀 Starting Federated Learning Server")
+    logger.info("=" * 80)
+    logger.info(f"Host={args.host}  Port={args.port}  Rounds={args.rounds}")
+    logger.info(f"Model={args.model}  NumClasses={args.num_classes}")
+    logger.info(f"MinClients={args.min_clients}  FitFrac={args.fraction_fit}  EvalFrac={args.fraction_evaluate}")
+    logger.info(f"Debug mode: {'enabled' if args.debug else 'disabled'}")
+    logger.info("=" * 80)
+
+    try:
+        strategy = create_server_strategy(
+            min_clients=args.min_clients,
+            fraction_fit=args.fraction_fit,
+            fraction_evaluate=args.fraction_evaluate,
+            model_name=args.model,
+            num_classes=args.num_classes,
+        )
+
+        server_cfg = fl.server.ServerConfig(num_rounds=args.rounds)
+        server_addr = f"{args.host}:{args.port}"
+
+        logger.info(f"🌐 Flower gRPC server → {server_addr}")
+        logger.info("⏳ Waiting for clients to connect...")
+
+        fl.server.start_server(
+            server_address=server_addr,
+            config=server_cfg,
+            strategy=strategy,
+        )
+
+    except KeyboardInterrupt:
+        logger.info("\n🛑 Interrupted by user")
+    finally:
+        try:
+            strategy.save_final_results()
+            strategy.save_last_model()
+            if strategy.history["round"]:
+                logger.info("\n🎉 Experiment finished")
+                logger.info(f"📁 Results: {strategy.results_dir}")
+                logger.info(
+                    f"🏆 Best round: {strategy.best_round}  "
+                    f"val_f1={strategy.best_f1:.4f}  val_acc={strategy.best_accuracy:.4f}"
+                )
+            else:
+                logger.warning("⚠️ No rounds completed")
+        except Exception as e:
+            logger.error(f"❌ Cleanup error: {e}")
+
+if __name__ == "__main__":
+    try:
+        import multiprocessing as mp
+        mp.set_start_method("spawn", force=True)
+    except RuntimeError:
+        pass
+    main()
