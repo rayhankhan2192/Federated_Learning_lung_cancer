@@ -2,6 +2,7 @@
 
 import argparse
 from typing import Dict, List, Tuple, Optional, Union
+from collections import OrderedDict
 import flwr as fl
 import numpy as np
 import torch
@@ -363,4 +364,92 @@ class MedicalFLStrategy(fl.server.strategy.FedAvg):
             "total_test_examples": total_examples,
             "num_eval_clients": len(results),
         }
+    
+    def _log_round_summary(self, round_num: int, summary: Dict, num_clients: int):
+        logger.info("=" * 80)
+        logger.info(f"ROUND {round_num} SUMMARY")
+        logger.info("=" * 80)
+        logger.info(f"Clients: {num_clients} | examples: {summary['total_examples']:,}")
+        logger.info(f"Train: loss={summary['train_loss_avg']:.4f} acc={summary['train_accuracy_avg']:.4f} f1={summary['train_f1_avg']:.4f}")
+        logger.info(f"Val  : loss={summary['val_loss_avg']:.4f} acc={summary['val_accuracy_avg']:.4f} f1={summary['val_f1_avg']:.4f}")
+        logger.info(f"Best : round={self.best_round} val_f1={self.best_f1:.4f} val_acc={self.best_accuracy:.4f}")
+        logger.info("=" * 80)
+
+    def save_best_model(self) -> None:
+        """Save the best global model checkpoint based on validation F1 score."""
+        if self.best_parameters is None:
+            logger.warning("No best parameters available, skipping model save.")
+            return
+
+        try:
+            # Ensure models folder is on sys.path for dynamic import
+            models_dir = os.path.join(os.path.dirname(__file__), "models")
+            if models_dir not in sys.path:
+                sys.path.insert(0, models_dir)
+
+            # Rebuild the model and load the best parameters
+            model = get_model(self.model_name, num_classes=self.num_classes, pretrained=False)
+            param_pairs = zip(
+                model.state_dict().keys(),
+                fl.common.parameters_to_ndarrays(self.best_parameters),
+            )
+            best_state_dict = OrderedDict({name: torch.tensor(arr) for name, arr in param_pairs})
+
+            # Build checkpoint dictionary
+            checkpoint = {
+                "round": self.best_round,
+                "model_state_dict": best_state_dict,
+                "best_f1": self.best_f1,
+                "best_accuracy": self.best_accuracy,
+                "model_name": self.model_name,
+                "num_classes": self.num_classes,
+                "timestamp": datetime.now().isoformat(),
+            }
+
+            # Save to file
+            save_path = os.path.join(self.results_dir, f"best_model_round_{self.best_round}.pth")
+            torch.save(checkpoint, save_path)
+
+            logger.info(f"Best model saved successfully → {save_path}")
+
+        except Exception as exc:
+            logger.error(f"Failed to save best model: {exc}")
+
+
+    def save_last_model(self) -> None:
+        """Save the most recent global model checkpoint (last round)."""
+        if self.last_parameters is None:
+            logger.warning("No last parameters available, skipping model save.")
+            return
+
+        try:
+            # Ensure models folder is on sys.path for dynamic import
+            models_dir = os.path.join(os.path.dirname(__file__), "models")
+            if models_dir not in sys.path:
+                sys.path.insert(0, models_dir)
+
+            # Build model and load last parameters
+            model = get_model(self.model_name, num_classes=self.num_classes, pretrained=False)
+            param_pairs = zip(
+                model.state_dict().keys(),
+                fl.common.parameters_to_ndarrays(self.last_parameters),
+            )
+            last_state_dict = OrderedDict({name: torch.tensor(arr) for name, arr in param_pairs})
+
+            # Build checkpoint
+            checkpoint = {
+                "model_state_dict": last_state_dict,
+                "model_name": self.model_name,
+                "num_classes": self.num_classes,
+                "timestamp": datetime.now().isoformat(),
+            }
+
+            # Save to file
+            save_path = os.path.join(self.results_dir, "last_global_model.pth")
+            torch.save(checkpoint, save_path)
+
+            logger.info(f"Last global model saved successfully → {save_path}")
+
+        except Exception as exc:
+            logger.error(f"Failed to save last global model: {exc}")
 
