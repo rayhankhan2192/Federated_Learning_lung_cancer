@@ -1,3 +1,9 @@
+import os
+os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0" 
+import logging, warnings
+logging.getLogger("tensorflow").setLevel(logging.ERROR)
+warnings.filterwarnings("ignore", category=UserWarning, module="tensorflow")
+
 import torch
 import torch.nn as nn
 import flwr as fl
@@ -19,14 +25,25 @@ from utils.train_eval import ModelTrainer, ModelMetrics, get_optimizer
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+RESULTS_BASE_DIR = os.path.abspath("Result/ClientResults")
+os.makedirs(RESULTS_BASE_DIR, exist_ok=True)
+
 class MedicalFLClient(fl.client.NumPyClient):
     """
     Federated Learning client for medical image classification
     """
     
-    def __init__(self, client_id: int, data_dir: str, device: torch.device,
-                 model_name: str = "customcnn", num_classes: int = 3,
-                 batch_size: int = 32, local_epochs: int = 8):
+    def __init__(
+        self, 
+        client_id: int, 
+        data_dir: str, 
+        device: torch.device,
+        model_name: str = "customcnn", 
+        num_classes: int = 3,
+        batch_size: int = 32, 
+        local_epochs: int = 8,
+        results_base_dir: str = RESULTS_BASE_DIR
+        ):
         """
         Initialize FL client
         
@@ -45,6 +62,7 @@ class MedicalFLClient(fl.client.NumPyClient):
         self.num_classes = num_classes
         self.batch_size = batch_size
         self.local_epochs = local_epochs
+        self.results_dir = results_base_dir
         
         # Initialize model
         self.model = get_model(model_name, num_classes, pretrained=True)
@@ -67,8 +85,9 @@ class MedicalFLClient(fl.client.NumPyClient):
         logger.info(f"Client {client_id}: Class weights: {self.class_weights}")
         
         # Initialize trainer
-        save_dir = f"client_{client_id}_checkpoints"
-        log_dir = f"client_{client_id}_logs"
+        #self.results_dir = os.path.join(results_base_dir, f"client_{client_id}_checkpoints")
+        save_dir = os.path.join(results_base_dir, f"client_{client_id}_checkpoints")
+        log_dir = os.path.join(results_base_dir, f"client_{client_id}_logs")
         self.trainer = ModelTrainer(self.model, device, save_dir, log_dir)
         
         # Training configuration

@@ -384,7 +384,7 @@ class ModelTrainer:
             save_path = os.path.join(self.save_dir, 'confusion_matrix.png')
         
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.show()
+        # plt.show()
 
     def plot_training_history(self, metrics: List[str] = ['loss', 'accuracy'], save_path: str = None):
         """Plot training history"""
@@ -411,7 +411,7 @@ class ModelTrainer:
             save_path = os.path.join(self.save_dir, 'training_history.png')
         
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.show()
+        # plt.show()
 
 
     def save_checkpoint(self, epoch: int, train_metrics: Dict, val_metrics: Dict, is_best: bool = False):

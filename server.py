@@ -1,5 +1,12 @@
 # Federated server
 
+import os
+os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0" 
+import logging, warnings
+logging.getLogger("tensorflow").setLevel(logging.ERROR)
+warnings.filterwarnings("ignore", category=UserWarning, module="tensorflow")
+
+
 import argparse
 from typing import Dict, List, Tuple, Optional, Union
 from collections import OrderedDict
@@ -14,6 +21,8 @@ import os
 import json
 import time
 import matplotlib
+from flwr.server.client_manager import SimpleClientManager, ClientProxy
+import threading
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
@@ -22,6 +31,10 @@ from models.model_factory import get_model
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("FL-Server")
+
+RESULTS_BASE_DIR = os.path.abspath("Result/FLResult")
+os.makedirs(RESULTS_BASE_DIR, exist_ok=True)
+
 
 def get_init_parameters(model_name: str, num_classes: int) -> fl.common.Parameters:
     """Get initial model parameters for FL server"""
@@ -42,7 +55,7 @@ def get_init_parameters(model_name: str, num_classes: int) -> fl.common.Paramete
         logger.info(f"Total number of parameters: {total_params}")
         return fl.common.ndarrays_to_parameters(parameters)
     except Exception as e:
-        logger.error(f"❌ Failed to get initial parameters: {e}")
+        logger.error(f"Failed to get initial parameters: {e}")
         import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
         return None
@@ -50,8 +63,8 @@ def get_init_parameters(model_name: str, num_classes: int) -> fl.common.Paramete
 def fit_config(server_round: int)->Dict[str, fl.common.Scalar]:
     """Per-round training config broadcast to clients."""
     config = {
-        "serever_round": server_round,
-        "local_epochs": 2,
+        "server_round": server_round,
+        "local_epochs": 10,
         "learning_rate": 1e-3,
         "weight_decay": 1e-4,
         "loss_function": "cross_entropy",
@@ -122,6 +135,7 @@ class MedicalFLStrategy(fl.server.strategy.FedAvg):
         initial_parameters: Optional[fl.common.Parameters] = None,
         fit_metrics_aggregation_fn=None,
         evaluate_metrics_aggregation_fn=None,
+        results_base_dir: str = RESULTS_BASE_DIR,
     ):
         super().__init__(
             fraction_fit=fraction_fit,
@@ -165,12 +179,12 @@ class MedicalFLStrategy(fl.server.strategy.FedAvg):
         self.client_metrics_history = {}
 
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.results_dir = f"fl_results_{ts}"
-        os.makedirs(self.results_dir, exist_ok=True)
+        self.results_base_dir = os.path.join(results_base_dir, f"fl_results_{ts}")
+        os.makedirs(self.results_base_dir, exist_ok=True)
         self._save_strategy_config()
 
         logger.info("FL Strategy initialized")
-        logger.info(f"   → results_dir: {self.results_dir}")
+        logger.info(f"   → results_base_dir: {self.results_base_dir}")
         logger.info(f"   → model={self.model_name}, num_classes={self.num_classes}")
 
     def _save_strategy_config(self):
@@ -186,7 +200,7 @@ class MedicalFLStrategy(fl.server.strategy.FedAvg):
             "accept_failures": self.accept_failures,
             "timestamp": datetime.now().isoformat(),
         }
-        with open(os.path.join(self.results_dir, "strategy_config.json"), "w") as f:
+        with open(os.path.join(self.results_base_dir, "strategy_config.json"), "w") as f:
             json.dump(config, f, indent=2)
 
     def configure_fit(
@@ -412,7 +426,7 @@ class MedicalFLStrategy(fl.server.strategy.FedAvg):
             }
 
             # Save to file
-            save_path = os.path.join(self.results_dir, f"best_model_round_{self.best_round}.pth")
+            save_path = os.path.join(self.results_base_dir, f"best_model_round_{self.best_round}.pth")
             torch.save(checkpoint, save_path)
 
             logger.info(f"Best model saved successfully → {save_path}")
@@ -450,7 +464,7 @@ class MedicalFLStrategy(fl.server.strategy.FedAvg):
             }
 
             # Save to file
-            save_path = os.path.join(self.results_dir, "last_global_model.pth")
+            save_path = os.path.join(self.results_base_dir, "last_global_model.pth")
             torch.save(checkpoint, save_path)
 
             logger.info(f"Last global model saved successfully → {save_path}")
@@ -460,9 +474,9 @@ class MedicalFLStrategy(fl.server.strategy.FedAvg):
 
     def save_intermediate_results(self, rnd: int):
         try:
-            with open(os.path.join(self.results_dir, f"history_round_{rnd}.json"), "w") as f:
+            with open(os.path.join(self.results_base_dir, f"history_round_{rnd}.json"), "w") as f:
                 json.dump(self.history, f, indent=2)
-            with open(os.path.join(self.results_dir, f"client_metrics_round_{rnd}.json"), "w") as f:
+            with open(os.path.join(self.results_base_dir, f"client_metrics_round_{rnd}.json"), "w") as f:
                 json.dump(self.client_metrics_history, f, indent=2)
             self.plot_training_curves(save_suffix=f"_round_{rnd}")
             logger.info(f"Intermediate results saved for round {rnd}")
@@ -471,13 +485,13 @@ class MedicalFLStrategy(fl.server.strategy.FedAvg):
 
     def save_final_results(self):
         try:
-            with open(os.path.join(self.results_dir, "final_training_history.json"), "w") as f:
+            with open(os.path.join(self.results_base_dir, "final_training_history.json"), "w") as f:
                 json.dump(self.history, f, indent=2)
-            with open(os.path.join(self.results_dir, "final_client_metrics.json"), "w") as f:
+            with open(os.path.join(self.results_base_dir, "final_client_metrics.json"), "w") as f:
                 json.dump(self.client_metrics_history, f, indent=2)
             self.plot_training_curves(save_suffix="_final")
-            self._generate_final_report()
-            logger.info(f"Final results saved in {self.results_dir}")
+            #self._generate_final_report()
+            logger.info(f"Final results saved in {self.results_base_dir}")
         except Exception as e:
             logger.error(f"Failed to save final results: {e}")
 
@@ -528,10 +542,10 @@ class MedicalFLStrategy(fl.server.strategy.FedAvg):
             ax.grid(True, alpha=0.3)
             ax.legend(loc="best")
         plt.tight_layout()
-        out = os.path.join(self.results_dir, f"training_curves{save_suffix}.png")
+        out = os.path.join(self.results_base_dir, f"training_curves{save_suffix}.png")
         plt.savefig(out, dpi=300, bbox_inches="tight")
         plt.close()
-        logger.info(f"📊 Saved plot → {out}")
+        logger.info(f"Saved plot → {out}")
 
 
 def create_server_strategy(
@@ -565,6 +579,44 @@ def create_server_strategy(
         evaluate_metrics_aggregation_fn=weighted_average,
     )
 
+class LoggingClientManager(SimpleClientManager):
+    def __init__(self, expected_clients: int):
+        super().__init__()
+        self.expected_clients = expected_clients
+
+    def register(self, client: ClientProxy) -> bool:
+        ok = super().register(client)
+        n = self.num_available()
+        remaining = max(self.expected_clients - n, 0)
+        logger.info(f"Client connected: {client.cid} | connected={n} | waiting={remaining}")
+        if n >= self.expected_clients:
+            logger.info("Required clients connected. Starting rounds as soon as strategy is ready.")
+        return ok
+
+    def unregister(self, client: ClientProxy) -> None:
+        super().unregister(client)
+        n = self.num_available()
+        remaining = max(self.expected_clients - n, 0)
+        logger.info(f"Client disconnected: {client.cid} | connected={n} | waiting={remaining}")
+
+def start_waiting_heartbeat(cm: SimpleClientManager, target: int, interval_sec: float = 2.0):
+    stop_evt = threading.Event()
+
+    def _loop():
+        # Print until target reached
+        while not stop_evt.is_set():
+            connected = cm.num_available()
+            remaining = max(target - connected, 0)
+            if remaining <= 0:
+                stop_evt.set()
+                break
+            logger.info(f"⏳ Waiting for clients… connected={connected} | waiting={remaining}")
+            time.sleep(interval_sec)
+
+    thr = threading.Thread(target=_loop, daemon=True)
+    thr.start()
+    return stop_evt
+
 def main():
     parser = argparse.ArgumentParser("Federated Learning Server (Medical)")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Bind address")
@@ -576,7 +628,12 @@ def main():
     parser.add_argument("--model", type=str, default="customcnn", choices=["resnet18", "resnet50", "customcnn"])
     parser.add_argument("--num-classes", type=int, default=3)
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument("--expected-clients",type=int,default=None, help="How many clients you expect to connect (for logs). Defaults to --min-clients.",
+)
     args = parser.parse_args()
+
+    if args.expected_clients is None:
+        args.expected_clients = args.min_clients
 
     # Configure logging based on debug flag
     log_level = logging.DEBUG if args.debug else logging.INFO
@@ -585,7 +642,7 @@ def main():
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s"
     )
 
-    logger.info("🚀 Starting Federated Learning Server")
+    logger.info("Starting Federated Learning Server")
     logger.info("=" * 80)
     logger.info(f"Host={args.host}  Port={args.port}  Rounds={args.rounds}")
     logger.info(f"Model={args.model}  NumClasses={args.num_classes}")
@@ -601,36 +658,46 @@ def main():
             model_name=args.model,
             num_classes=args.num_classes,
         )
+        client_manager = LoggingClientManager(expected_clients=args.expected_clients)
 
         server_cfg = fl.server.ServerConfig(num_rounds=args.rounds)
         server_addr = f"{args.host}:{args.port}"
 
         logger.info(f"🌐 Flower gRPC server → {server_addr}")
-        logger.info("⏳ Waiting for clients to connect...")
+        logger.info(f"🎯 Expecting {args.expected_clients} clients to connect")
 
+        # (Optional) Start heartbeat that prints while we’re waiting
+        hb_stop = start_waiting_heartbeat(client_manager, args.expected_clients, interval_sec=2.0)
+
+        # Start Flower server (blocking)
         fl.server.start_server(
             server_address=server_addr,
             config=server_cfg,
             strategy=strategy,
+            client_manager=client_manager, 
         )
+        try:
+            hb_stop.set()
+        except Exception:
+            pass
 
     except KeyboardInterrupt:
-        logger.info("\n🛑 Interrupted by user")
+        logger.info("\nInterrupted by user")
     finally:
         try:
             strategy.save_final_results()
             strategy.save_last_model()
             if strategy.history["round"]:
-                logger.info("\n🎉 Experiment finished")
-                logger.info(f"📁 Results: {strategy.results_dir}")
+                logger.info("\nExperiment finished")
+                logger.info(f"Results: {strategy.results_base_dir}")
                 logger.info(
-                    f"🏆 Best round: {strategy.best_round}  "
+                    f"Best round: {strategy.best_round}  "
                     f"val_f1={strategy.best_f1:.4f}  val_acc={strategy.best_accuracy:.4f}"
                 )
             else:
-                logger.warning("⚠️ No rounds completed")
+                logger.warning("No rounds completed")
         except Exception as e:
-            logger.error(f"❌ Cleanup error: {e}")
+            logger.error(f"Cleanup error: {e}")
 
 if __name__ == "__main__":
     try:

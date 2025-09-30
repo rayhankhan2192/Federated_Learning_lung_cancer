@@ -10,3 +10,4 @@ models/__pycache__/
 *.pyd
 *.egg-info/
 migrations/
+Result/
