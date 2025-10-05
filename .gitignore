@@ -11,3 +11,4 @@ models/__pycache__/
 *.egg-info/
 migrations/
 Result/
+predicted_outputs/
