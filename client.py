@@ -118,7 +118,6 @@ class MedicalFLClient(fl.client.NumPyClient):
     """
     Federated Learning client for medical image classification
     """
-    
     def __init__(
         self, 
         client_id: int, 
@@ -129,19 +128,7 @@ class MedicalFLClient(fl.client.NumPyClient):
         batch_size: int = 32, 
         local_epochs: int = 8,
         results_base_dir: str = RESULTS_BASE_DIR,
-        ):
-        """
-        Initialize FL client
-        
-        Args:
-            client_id: Unique identifier for this client
-            data_dir: Path to client's local data
-            device: Computing device (CPU/GPU)
-            model_name: Model architecture to use
-            num_classes: Number of classification classes
-            batch_size: Batch size for training
-            local_epochs: Number of local training epochs per round
-        """
+    ):
         self.client_id = client_id
         self.data_dir = data_dir
         self.device = device
@@ -149,19 +136,17 @@ class MedicalFLClient(fl.client.NumPyClient):
         self.batch_size = batch_size
         self.local_epochs = local_epochs
         self.results_dir = results_base_dir
-        
+
         # Initialize model
         self.model = get_model(model_name, num_classes, pretrained=True)
         self.model.to(device)
-        os.makedirs(self.xai_dir, exist_ok=True)
-
-        # XAI: pick last conv layer once
-        self.target_layer = _find_last_conv(self.model)
 
         self.xai_dir = os.path.join(self.results_dir, f"client_{client_id}_xai")
+        os.makedirs(self.xai_dir, exist_ok=True)
 
+        # pick last conv once
+        self.target_layer = _find_last_conv(self.model)
 
-        
         # Create data loaders
         logger.info(f"Client {client_id}: Loading data from {data_dir}")
         self.train_loader, self.val_loader, self.test_loader = create_data_loaders(
@@ -173,25 +158,25 @@ class MedicalFLClient(fl.client.NumPyClient):
             image_size=(224, 224),
             num_workers=3
         )
-        
-        # Calculate class weights for handling imbalanced data
+
+        # Class weights
         self.class_weights = get_class_weights(self.train_loader)
         logger.info(f"Client {client_id}: Class weights: {self.class_weights}")
-        
-        # Initialize trainer
-        #self.results_dir = os.path.join(results_base_dir, f"client_{client_id}_checkpoints")
+
+        # Trainer
         save_dir = os.path.join(results_base_dir, f"client_{client_id}_checkpoints")
         log_dir = os.path.join(results_base_dir, f"client_{client_id}_logs")
         self.trainer = ModelTrainer(self.model, device, save_dir, log_dir)
-        
-        # Training configuration
+
+        # Training config
         self.learning_rate = 0.001
         self.weight_decay = 1e-4
-        
+
         logger.info(f"Client {client_id} initialized successfully")
         logger.info(f"  - Training samples: {len(self.train_loader.dataset)}")
         logger.info(f"  - Validation samples: {len(self.val_loader.dataset)}")
         logger.info(f"  - Test samples: {len(self.test_loader.dataset)}")
+
     
     def get_parameters(self, config: Dict = None) -> List[np.ndarray]:
         """
