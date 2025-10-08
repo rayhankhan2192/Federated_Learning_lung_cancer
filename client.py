@@ -13,6 +13,9 @@ import argparse
 import logging
 from typing import Dict, List, Tuple
 import os
+import cv2
+from typing import Optional
+
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -28,6 +31,89 @@ logger = logging.getLogger(__name__)
 RESULTS_BASE_DIR = os.path.abspath("Result/ClientResults")
 os.makedirs(RESULTS_BASE_DIR, exist_ok=True)
 
+
+def _normalize01(a: np.ndarray) -> np.ndarray:
+    a = a.astype(np.float32)
+    a -= a.min(); a += 1e-12
+    a /= a.max()
+    return a
+
+def _find_last_conv(module: nn.Module) -> nn.Conv2d:
+    last = None
+    for m in module.modules():
+        if isinstance(m, nn.Conv2d):
+            last = m
+    if last is None:
+        raise RuntimeError("No Conv2d layer found for Grad-CAM.")
+    return last
+
+class _GradCAM:
+    """Minimal, fast Grad-CAM for 1-ch CT; works with CustomCNN/ResNet50."""
+    def __init__(self, model: nn.Module, target_layer: nn.Module):
+        self.model = model.eval()
+        self.tl = target_layer
+        self.A = None
+        self.dA = None
+        self.ha = self.tl.register_forward_hook(self._hook_act)
+        self.hg = self.tl.register_full_backward_hook(self._hook_grad)
+
+    def _hook_act(self, module, inp, out):
+        self.A = out
+    def _hook_grad(self, module, gin, gout):
+        self.dA = gout[0]
+
+    def generate(self, x: torch.Tensor, class_idx: Optional[int] = None) -> np.ndarray:
+        self.model.zero_grad(set_to_none=True)
+        logits = self.model(x)
+        if class_idx is None:
+            class_idx = int(torch.argmax(logits, dim=1).item())
+        score = logits[0, class_idx]
+        score.backward(retain_graph=True)
+
+        A = self.A[0]                 # [C,H,W]
+        dA = self.dA[0]               # [C,H,W]
+        w = dA.mean(dim=(1,2))        # [C]
+        cam = torch.relu((w[:,None,None] * A).sum(dim=0)).detach().cpu().numpy()
+        return _normalize01(cam)
+
+    def close(self):
+        self.ha.remove(); self.hg.remove()
+
+def _overlay_on_gray(img_u8: np.ndarray, heat: np.ndarray, alpha: float = 0.35) -> np.ndarray:
+    """img_u8: HxW uint8; heat: HxW [0..1]; returns HxWx3 BGR (OpenCV)"""
+    H, W = img_u8.shape
+    heat_r = cv2.resize(heat, (W, H))
+    heatmap = cv2.applyColorMap((heat_r*255).astype(np.uint8), cv2.COLORMAP_JET)
+    base = cv2.cvtColor(img_u8, cv2.COLOR_GRAY2BGR)
+    return cv2.addWeighted(base, 1.0, heatmap, alpha, 0)
+
+def _deletion_curve_scores(model: nn.Module, x: torch.Tensor, heat: np.ndarray, steps: int = 10) -> List[float]:
+    """Iteratively zero most-important pixels; record target logit."""
+    device = next(model.parameters()).device
+    x = x.clone().to(device)
+    with torch.no_grad():
+        base_logits = model(x)[0]
+        cls = int(base_logits.argmax().item())
+        scores = [base_logits[cls].item()]
+
+    H, W = heat.shape
+    order = np.argsort(-heat.flatten())  # descending
+    k = int(np.ceil(len(order) / steps))
+    for s in range(steps):
+        idxs = order[s*k:(s+1)*k]
+        for idx in idxs:
+            y, z = idx // W, idx % W
+            x[0, 0, y, z] = 0.0
+        with torch.no_grad():
+            scores.append(model(x)[0, cls].item())
+    return scores
+
+def _auc_trapz(y: List[float]) -> float:
+    y = np.asarray(y, dtype=np.float32)
+    x = np.linspace(0, 1, len(y), dtype=np.float32)
+    return float(np.trapz(y, x))
+
+
 class MedicalFLClient(fl.client.NumPyClient):
     """
     Federated Learning client for medical image classification
@@ -42,7 +128,7 @@ class MedicalFLClient(fl.client.NumPyClient):
         num_classes: int = 3,
         batch_size: int = 32, 
         local_epochs: int = 8,
-        results_base_dir: str = RESULTS_BASE_DIR
+        results_base_dir: str = RESULTS_BASE_DIR,
         ):
         """
         Initialize FL client
@@ -67,6 +153,14 @@ class MedicalFLClient(fl.client.NumPyClient):
         # Initialize model
         self.model = get_model(model_name, num_classes, pretrained=True)
         self.model.to(device)
+        os.makedirs(self.xai_dir, exist_ok=True)
+
+        # XAI: pick last conv layer once
+        self.target_layer = _find_last_conv(self.model)
+
+        self.xai_dir = os.path.join(self.results_dir, f"client_{client_id}_xai")
+
+
         
         # Create data loaders
         logger.info(f"Client {client_id}: Loading data from {data_dir}")
@@ -173,6 +267,8 @@ class MedicalFLClient(fl.client.NumPyClient):
         # === Evaluation after training
         test_metrics = self.trainer.evaluate(self.test_loader)
 
+        xai_metrics = self._xai_probe(self.val_loader, num_samples=16, save_k=3)
+
         # === Save model (optional)
         model_path = f"client_{self.client_id}_best_model.pth"
         torch.save(self.model.state_dict(), model_path)
@@ -187,7 +283,8 @@ class MedicalFLClient(fl.client.NumPyClient):
             "val_f1": train_history["val_f1_macro"][-1],
             "test_accuracy": test_metrics["accuracy"],
             "test_f1": test_metrics["f1_macro"],
-            "num_examples": len(self.train_loader.dataset)
+            "num_examples": len(self.train_loader.dataset),
+            **xai_metrics, 
         }
 
         logger.info(f"Client {self.client_id}: Local training completed")
@@ -212,6 +309,9 @@ class MedicalFLClient(fl.client.NumPyClient):
         
         # Evaluate on test set
         test_metrics = self.trainer.evaluate(self.test_loader)
+        # Optional: run a quick XAI probe during evaluate as well
+        xai_metrics = self._xai_probe(self.val_loader, num_samples=12, save_k=0)
+        test_metrics.update(xai_metrics)
         
         logger.info(f"Client {self.client_id}: Evaluation completed")
         logger.info(f"  - Test Accuracy: {test_metrics['accuracy']:.4f}")
@@ -264,6 +364,67 @@ class MedicalFLClient(fl.client.NumPyClient):
         metrics['loss'] = avg_loss
         
         return metrics
+    
+    def _xai_probe(self, loader, num_samples: int = 16, save_k: int = 3) -> Dict:
+        """
+        Runs Grad-CAM on a small subset, computes Deletion-AUC faithfulness,
+        and (optionally) saves a few overlays locally. Returns numeric metrics only.
+        """
+        self.model.eval()
+        device = self.device
+        cam_engine = _GradCAM(self.model, self.target_layer)
+
+        del_aucs = []
+        saved = 0
+        seen = 0
+
+        with torch.no_grad():
+            for data, target in loader:
+                # data: [B,1,224,224], target: [B]
+                for i in range(data.size(0)):
+                    x = data[i:i+1].to(device)  # [1,1,H,W]
+
+                    # forward predict class
+                    logits = self.model(x)
+                    pred_idx = int(torch.argmax(logits, dim=1).item())
+
+                    # Grad-CAM heat
+                    heat = cam_engine.generate(x, class_idx=pred_idx)  # [H,W] float [0..1]
+
+                    # Faithfulness: deletion curve AUC (lower is better)
+                    scores = _deletion_curve_scores(self.model, x, heat, steps=10)
+                    del_aucs.append(_auc_trapz(scores))
+
+                    # Optionally save a few overlays (local only)
+                    if saved < save_k:
+                        # input tensor back to uint8 for visualization
+                        # assuming your dataloader already returns normalized [0,1] or [-, +]?
+                        # safest: rescale from tensor directly
+                        img = data[i, 0].cpu().numpy()
+                        img = (img - img.min()) / (img.max() - img.min() + 1e-12)
+                        img_u8 = (img * 255).astype(np.uint8)
+
+                        overlay_bgr = _overlay_on_gray(img_u8, heat, alpha=0.35)
+                        out_path = os.path.join(self.xai_dir, f"round_overlay_{saved+1}.png")
+                        cv2.imwrite(out_path, overlay_bgr)
+                        saved += 1
+
+                    seen += 1
+                    if seen >= num_samples:
+                        break
+                if seen >= num_samples:
+                    break
+
+        cam_engine.close()
+
+        # Aggregate metrics
+        if len(del_aucs) == 0:
+            return {"xai_del_auc_mean": 0.0, "xai_del_auc_std": 0.0}
+        return {
+            "xai_del_auc_mean": float(np.mean(del_aucs)),
+            "xai_del_auc_std": float(np.std(del_aucs)),
+        }
+
 
 def create_client(client_id: int, data_dir: str, model_name: str = "customcnn") -> MedicalFLClient:
     """

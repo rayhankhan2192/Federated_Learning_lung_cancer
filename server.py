@@ -72,6 +72,10 @@ def fit_config(server_round: int)->Dict[str, fl.common.Scalar]:
         "scheduler": "plateau",
         "use_scheduler": True,
         "batch_size": 32,
+
+        "xai_probe": True,
+        "xai_samples": 16,   # how many slices per client per round
+        "xai_save_k": 0,
     }
     if server_round > 20:
         config["loss_function"] = "focal"
@@ -168,6 +172,11 @@ class MedicalFLStrategy(fl.server.strategy.FedAvg):
             "num_clients": [],
             "client_data_sizes": [],
             "aggregation_time": [],
+
+            # ---- XAI history ----
+            "xai_del_auc_mean": [], "xai_del_auc_std": [],
+            # (optional if you add them from clients)
+            "xai_heat_in_mask_mean": [], "xai_heat_in_mask_std": [],
         }
         self.best_accuracy = 0.0
         self.best_f1 = 0.0
@@ -274,6 +283,13 @@ class MedicalFLStrategy(fl.server.strategy.FedAvg):
         self.history["client_data_sizes"].append(summary["client_data_sizes"])
         self.history["aggregation_time"].append(time.time() - t0)
 
+        # XAI history (only if keys exist in summary)
+        self.history["xai_del_auc_mean"].append(summary.get("xai_del_auc_mean_avg", np.nan))
+        self.history["xai_del_auc_std"].append(summary.get("xai_del_auc_std_avg", np.nan))
+        self.history["xai_heat_in_mask_mean"].append(summary.get("xai_heat_in_mask_mean_avg", np.nan))
+        self.history["xai_heat_in_mask_std"].append(summary.get("xai_heat_in_mask_std_avg", np.nan))
+
+
         # Track best by validation F1
         if summary["val_f1_avg"] > self.best_f1:
             self.best_f1 = summary["val_f1_avg"]
@@ -284,7 +300,12 @@ class MedicalFLStrategy(fl.server.strategy.FedAvg):
             logger.info(f"🏆 New best model: round={self.best_round}, "
                         f"val_f1={self.best_f1:.4f}, val_acc={self.best_accuracy:.4f}")
 
-        aggregated_metrics.update(summary)
+        # aggregated_metrics.update(summary)
+        aggregated_metrics.update({
+            k: v for k, v in summary.items()
+            if k.startswith("xai_")
+        })
+
         aggregated_metrics["aggregation_time"] = self.history["aggregation_time"][-1]
         self._log_round_summary(server_round, summary, len(results))
 
@@ -313,39 +334,84 @@ class MedicalFLStrategy(fl.server.strategy.FedAvg):
         return test["test_loss_avg"], test
     
 
-    def _calculate_fit_metrics(
-        self, results: List[Tuple[fl.server.client_proxy.ClientProxy, fl.common.FitRes]]) -> Dict:
-        """Calculate weighted average training/validation metrics from all clients."""
+    # def _calculate_fit_metrics(
+    #     self, results: List[Tuple[fl.server.client_proxy.ClientProxy, fl.common.FitRes]]) -> Dict:
+    #     """Calculate weighted average training/validation metrics from all clients."""
 
+    #     total_examples = sum(fit_res.num_examples for _, fit_res in results) or 1
+    #     metric_keys = ["train_loss", "train_accuracy", "train_f1",
+    #                 "val_loss", "val_accuracy", "val_f1"]
+
+    #     weighted_sums = {key: 0.0 for key in metric_keys}
+    #     client_data_sizes = []
+    #     client_metrics_list = []
+
+    #     for client_proxy, fit_res in results:
+    #         weight = fit_res.num_examples / total_examples
+    #         client_data_sizes.append(fit_res.num_examples)
+
+    #         metrics_for_client = {}
+    #         for key in metric_keys:
+    #             value = fit_res.metrics.get(key, 0.0) if fit_res.metrics else 0.0
+    #             weighted_sums[key] += float(value) * weight
+    #             metrics_for_client[key] = float(value)
+
+    #         client_metrics_list.append({
+    #             "client_id": client_proxy.cid,
+    #             "num_examples": fit_res.num_examples,
+    #             "metrics": metrics_for_client,
+    #         })
+
+    #     # Save per-round client metrics
+    #     current_round = len(self.history["round"]) + 1
+    #     self.client_metrics_history[current_round] = client_metrics_list
+
+    #     return {
+    #         "train_loss_avg": weighted_sums["train_loss"],
+    #         "train_accuracy_avg": weighted_sums["train_accuracy"],
+    #         "train_f1_avg": weighted_sums["train_f1"],
+    #         "val_loss_avg": weighted_sums["val_loss"],
+    #         "val_accuracy_avg": weighted_sums["val_accuracy"],
+    #         "val_f1_avg": weighted_sums["val_f1"],
+    #         "total_examples": total_examples,
+    #         "client_data_sizes": client_data_sizes,
+    #         "num_participating_clients": len(results),
+    #     }
+
+    def _calculate_fit_metrics(self, results):
         total_examples = sum(fit_res.num_examples for _, fit_res in results) or 1
-        metric_keys = ["train_loss", "train_accuracy", "train_f1",
-                    "val_loss", "val_accuracy", "val_f1"]
+        # include xai keys here (present only if clients sent them)
+        metric_keys = [
+            "train_loss","train_accuracy","train_f1",
+            "val_loss","val_accuracy","val_f1",
+            "xai_del_auc_mean","xai_del_auc_std",
+            "xai_heat_in_mask_mean","xai_heat_in_mask_std",
+        ]
 
         weighted_sums = {key: 0.0 for key in metric_keys}
-        client_data_sizes = []
-        client_metrics_list = []
+        present = {key: False for key in metric_keys}  # track which exist
+        client_data_sizes, client_metrics_list = [], []
 
         for client_proxy, fit_res in results:
             weight = fit_res.num_examples / total_examples
             client_data_sizes.append(fit_res.num_examples)
-
             metrics_for_client = {}
             for key in metric_keys:
-                value = fit_res.metrics.get(key, 0.0) if fit_res.metrics else 0.0
-                weighted_sums[key] += float(value) * weight
-                metrics_for_client[key] = float(value)
-
+                val = fit_res.metrics.get(key, None) if fit_res.metrics else None
+                if isinstance(val, (int, float, np.integer, np.floating)):
+                    weighted_sums[key] += float(val) * weight
+                    present[key] = True
+                    metrics_for_client[key] = float(val)
             client_metrics_list.append({
                 "client_id": client_proxy.cid,
                 "num_examples": fit_res.num_examples,
                 "metrics": metrics_for_client,
             })
 
-        # Save per-round client metrics
         current_round = len(self.history["round"]) + 1
         self.client_metrics_history[current_round] = client_metrics_list
 
-        return {
+        out = {
             "train_loss_avg": weighted_sums["train_loss"],
             "train_accuracy_avg": weighted_sums["train_accuracy"],
             "train_f1_avg": weighted_sums["train_f1"],
@@ -356,6 +422,15 @@ class MedicalFLStrategy(fl.server.strategy.FedAvg):
             "client_data_sizes": client_data_sizes,
             "num_participating_clients": len(results),
         }
+        # add XAI only if present
+        if present["xai_del_auc_mean"]:
+            out["xai_del_auc_mean_avg"] = weighted_sums["xai_del_auc_mean"]
+            out["xai_del_auc_std_avg"]  = weighted_sums["xai_del_auc_std"]
+        if present["xai_heat_in_mask_mean"]:
+            out["xai_heat_in_mask_mean_avg"] = weighted_sums["xai_heat_in_mask_mean"]
+            out["xai_heat_in_mask_std_avg"]  = weighted_sums["xai_heat_in_mask_std"]
+        return out
+
     
     def _calculate_eval_metrics(
         self, results: List[Tuple[fl.server.client_proxy.ClientProxy, fl.common.EvaluateRes]]
@@ -392,6 +467,12 @@ class MedicalFLStrategy(fl.server.strategy.FedAvg):
         logger.info(f"Train: loss={summary['train_loss_avg']:.4f} acc={summary['train_accuracy_avg']:.4f} f1={summary['train_f1_avg']:.4f}")
         logger.info(f"Val  : loss={summary['val_loss_avg']:.4f} acc={summary['val_accuracy_avg']:.4f} f1={summary['val_f1_avg']:.4f}")
         logger.info(f"Best : round={self.best_round} val_f1={self.best_f1:.4f} val_acc={self.best_accuracy:.4f}")
+
+        xai_mean = summary.get("xai_del_auc_mean_avg", None)
+        if xai_mean is not None:
+            logger.info(f"XAI  : delAUC={xai_mean:.4f} "
+                        f"mask_in={summary.get('xai_heat_in_mask_mean_avg','NA')}")
+
         logger.info("=" * 80)
 
     def save_best_model(self) -> None:
