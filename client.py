@@ -28,8 +28,9 @@ from utils.train_eval import ModelTrainer, ModelMetrics, get_optimizer
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-RESULTS_BASE_DIR = os.path.abspath("Result/ClientResults")
+RESULTS_BASE_DIR = os.path.abspath(os.path.join("Result", "clientresult"))
 os.makedirs(RESULTS_BASE_DIR, exist_ok=True)
+
 
 
 def _normalize01(a: np.ndarray) -> np.ndarray:
@@ -135,16 +136,23 @@ class MedicalFLClient(fl.client.NumPyClient):
         self.num_classes = num_classes
         self.batch_size = batch_size
         self.local_epochs = local_epochs
-        self.results_dir = results_base_dir
 
-        # Initialize model
+        self.results_base_dir = results_base_dir
+        os.makedirs(self.results_base_dir, exist_ok=True)
+        self.client_root = os.path.join(self.results_base_dir, f"client_{client_id}")
+        os.makedirs(self.client_root, exist_ok=True)
+        self.ckpt_dir     = os.path.join(self.client_root, "checkpoints")
+        self.log_dir      = os.path.join(self.client_root, "logs")
+        self.xai_dir      = os.path.join(self.client_root, "xai")
+        self.pred_dir     = os.path.join(self.client_root, "predictions")  
+        self.metrics_dir  = os.path.join(self.client_root, "metrics")       
+        for d in [self.ckpt_dir, self.log_dir, self.xai_dir, self.pred_dir, self.metrics_dir]:
+            os.makedirs(d, exist_ok=True)
+   
         self.model = get_model(model_name, num_classes, pretrained=True)
         self.model.to(device)
 
-        self.xai_dir = os.path.join(self.results_dir, f"client_{client_id}_xai")
-        os.makedirs(self.xai_dir, exist_ok=True)
-
-        # pick last conv once
+        # pick last conv once (for Grad-CAM, etc.)
         self.target_layer = _find_last_conv(self.model)
 
         # Create data loaders
@@ -161,12 +169,14 @@ class MedicalFLClient(fl.client.NumPyClient):
 
         # Class weights
         self.class_weights = get_class_weights(self.train_loader)
-        logger.info(f"Client {client_id}: Class weights: {self.class_weights}")
+        try:
+            cw_log = self.class_weights.tolist()  # if tensor/np
+        except Exception:
+            cw_log = self.class_weights
+        logger.info(f"Client {client_id}: Class weights: {cw_log}")
 
-        # Trainer
-        save_dir = os.path.join(results_base_dir, f"client_{client_id}_checkpoints")
-        log_dir = os.path.join(results_base_dir, f"client_{client_id}_logs")
-        self.trainer = ModelTrainer(self.model, device, save_dir, log_dir)
+        # Trainer now saves into the per-client folders
+        self.trainer = ModelTrainer(self.model, device, self.ckpt_dir, self.log_dir)
 
         # Training config
         self.learning_rate = 0.001
@@ -255,9 +265,11 @@ class MedicalFLClient(fl.client.NumPyClient):
         xai_metrics = self._xai_probe(self.val_loader, num_samples=16, save_k=3)
 
         # === Save model (optional)
-        model_path = f"client_{self.client_id}_best_model.pth"
-        torch.save(self.model.state_dict(), model_path)
-        logger.info(f"Client {self.client_id}: Best model saved to {model_path}")
+        #RESULTS_BASE_DIR = f"client_{self.client_id}_best_model.pth"
+        best_model_path = os.path.join(self.ckpt_dir, f"client_{self.client_id}_best_model.pth")
+        torch.save(self.model.state_dict(), best_model_path)
+        logger.info(f"Client {self.client_id}: Best model saved to {best_model_path}")
+
 
         # === Final Metrics
         metrics = {
@@ -440,30 +452,6 @@ def create_client(client_id: int, data_dir: str, model_name: str = "customcnn") 
     )
     
     return client
-
-# def main():
-#     """Main function to run FL client"""
-#     parser = argparse.ArgumentParser(description="Federated Learning Client for Medical Imaging")
-#     parser.add_argument("--client-id", type=int, default=1, help="Client ID")
-#     parser.add_argument("--data-dir", type=str, required=True, help="Path to client data directory")
-#     parser.add_argument("--server-address", type=str, default="localhost:8080", help="FL server address")
-#     parser.add_argument("--model", type=str, default="resnet18", choices=["resnet18", "resnet50"], help="Model architecture")
-    
-#     args = parser.parse_args()
-    
-#     # Validate data directory
-#     if not os.path.exists(args.data_dir):
-#         raise ValueError(f"Data directory not found: {args.data_dir}")
-    
-#     # Create client
-#     client = create_client(args.client_id, args.data_dir, args.model)
-    
-#     # Start FL client
-#     logger.info(f"Starting FL client {args.client_id} connecting to {args.server_address}")
-#     fl.client.start_numpy_client(
-#         server_address=args.server_address,
-#         client=client
-#     )
 
 def main():
     """Main function to run FL client"""
