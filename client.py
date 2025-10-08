@@ -156,7 +156,7 @@ class MedicalFLClient(fl.client.NumPyClient):
             val_split=0.1,
             test_split=0.1,
             image_size=(224, 224),
-            num_workers=3
+            num_workers=0
         )
 
         # Class weights
@@ -359,56 +359,57 @@ class MedicalFLClient(fl.client.NumPyClient):
         device = self.device
         cam_engine = _GradCAM(self.model, self.target_layer)
 
-        del_aucs = []
-        saved = 0
-        seen = 0
+        del_aucs, saved, seen = [], 0, 0
 
-        with torch.no_grad():
-            for data, target in loader:
-                # data: [B,1,224,224], target: [B]
-                for i in range(data.size(0)):
-                    x = data[i:i+1].to(device)  # [1,1,H,W]
+        for data, target in loader:
+            # data: [B,1,H,W]
+            B = data.size(0)
+            for i in range(B):
+                x = data[i:i+1].to(device)  # [1,1,H,W]
 
-                    # forward predict class
+                # 1) predict class WITHOUT grads
+                with torch.no_grad():
                     logits = self.model(x)
                     pred_idx = int(torch.argmax(logits, dim=1).item())
 
-                    # Grad-CAM heat
-                    heat = cam_engine.generate(x, class_idx=pred_idx)  # [H,W] float [0..1]
+                # 2) generate CAM WITH grads enabled
+                with torch.enable_grad():
+                    # make sure graph can propagate grads
+                    x = x.requires_grad_(True)
+                    heat = cam_engine.generate(x, class_idx=pred_idx)  # [H,W], [0..1]
 
-                    # Faithfulness: deletion curve AUC (lower is better)
-                    scores = _deletion_curve_scores(self.model, x, heat, steps=10)
-                    del_aucs.append(_auc_trapz(scores))
+                # 3) faithfulness (deletion curve) can be done without grads
+                scores = _deletion_curve_scores(self.model, x.detach(), heat, steps=10)
+                del_aucs.append(_auc_trapz(scores))
 
-                    # Optionally save a few overlays (local only)
-                    if saved < save_k:
-                        # input tensor back to uint8 for visualization
-                        # assuming your dataloader already returns normalized [0,1] or [-, +]?
-                        # safest: rescale from tensor directly
-                        img = data[i, 0].cpu().numpy()
-                        img = (img - img.min()) / (img.max() - img.min() + 1e-12)
-                        img_u8 = (img * 255).astype(np.uint8)
+                # 4) optionally save a few overlays locally
+                if saved < save_k:
+                    img = data[i, 0].cpu().numpy()
+                    img = (img - img.min()) / (img.max() - img.min() + 1e-12)
+                    img_u8 = (img * 255).astype(np.uint8)
+                    overlay_bgr = _overlay_on_gray(img_u8, heat, alpha=0.35)
 
-                        overlay_bgr = _overlay_on_gray(img_u8, heat, alpha=0.35)
-                        out_path = os.path.join(self.xai_dir, f"round_overlay_{saved+1}.png")
-                        cv2.imwrite(out_path, overlay_bgr)
-                        saved += 1
+                    rnd = loader.__dict__.get("round", None)  # if you pass round in, else omit
+                    name = f"round_overlay_{saved+1}.png" if rnd is None else f"round{int(rnd):03d}_overlay_{saved+1}.png"
+                    out_path = os.path.join(self.xai_dir, name)
+                    cv2.imwrite(out_path, overlay_bgr)
+                    saved += 1
 
-                    seen += 1
-                    if seen >= num_samples:
-                        break
+                seen += 1
                 if seen >= num_samples:
                     break
+            if seen >= num_samples:
+                break
 
         cam_engine.close()
 
-        # Aggregate metrics
-        if len(del_aucs) == 0:
+        if not del_aucs:
             return {"xai_del_auc_mean": 0.0, "xai_del_auc_std": 0.0}
         return {
             "xai_del_auc_mean": float(np.mean(del_aucs)),
             "xai_del_auc_std": float(np.std(del_aucs)),
         }
+
 
 
 def create_client(client_id: int, data_dir: str, model_name: str = "customcnn") -> MedicalFLClient:
