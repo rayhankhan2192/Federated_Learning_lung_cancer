@@ -85,8 +85,8 @@ def predict_and_save(model, img_path: str, class_names, out_dir: str):
     return pred_class, conf, probs
 
 def main():
-    model_path = r"E:\Python\Research\LungCancerFL\Federated_Learning_lung_cancer\Result\FLResult\fl_results_20250930_180627\last_global_model.pth"
-    img_path   = r"E:\Python\Research\LungCancerFL\Federated_Learning_lung_cancer\DataSet\Lung-CT Scan\Normal cases\Normal case (9).jpg"
+    model_path = r"E:\Python\Research\LungCancerFL\Federated_Learning_lung_cancer\Result\FLResult\fl_results_20251008_205502\last_global_model.pth"
+    img_path   = r"image copy 3.png"
     out_dir    = r"E:\Python\Research\LungCancerFL\Federated_Learning_lung_cancer\predicted_outputs"
 
     class_names = ["Benign case", "Malignant case", "Normal case"]

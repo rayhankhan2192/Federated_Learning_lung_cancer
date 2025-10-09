@@ -64,7 +64,7 @@ def fit_config(server_round: int)->Dict[str, fl.common.Scalar]:
     """Per-round training config broadcast to clients."""
     config = {
         "server_round": server_round,
-        "local_epochs": 2,
+        "local_epochs": 6,
         "learning_rate": 1e-3,
         "weight_decay": 1e-4,
         "loss_function": "cross_entropy",
