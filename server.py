@@ -706,7 +706,7 @@ def main():
     parser.add_argument("--min-clients", type=int, default=1, help="Minimum clients per round")
     parser.add_argument("--fraction-fit", type=float, default=1.0, help="Fraction of clients to train each round")
     parser.add_argument("--fraction-evaluate", type=float, default=1.0, help="Fraction of clients to evaluate each round")
-    parser.add_argument("--model", type=str, default="customcnn", choices=["resnet18", "resnet50", "customcnn"])
+    parser.add_argument("--model", type=str, default="customcnn", choices=["mobilenetv3", "hybridmodel", "resnet50", "customcnn"])
     parser.add_argument("--num-classes", type=int, default=3)
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument("--expected-clients",type=int,default=None, help="How many clients you expect to connect (for logs). Defaults to --min-clients.",
