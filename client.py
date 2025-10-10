@@ -459,7 +459,7 @@ def main():
     parser.add_argument("--client-id", type=int, default=1, help="Client ID")
     parser.add_argument("--data-dir", type=str, required=True, help="Path to client data directory")
     parser.add_argument("--server-address", type=str, default="localhost:8080", help="FL server address")
-    parser.add_argument("--model", type=str, default="resnet18", choices=["mobilenetv3", "resnet50", "customcnn"], help="Model architecture")
+    parser.add_argument("--model", type=str, default="customcnn", choices=["mobilenetv3", "hybridmodel", "resnet50", "customcnn"], help="Model architecture")
     parser.add_argument("--train-local", action="store_true", help="Run local training only (no FL server)")
 
     args = parser.parse_args()
