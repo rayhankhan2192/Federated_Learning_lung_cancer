@@ -60,11 +60,11 @@ def get_init_parameters(model_name: str, num_classes: int) -> fl.common.Paramete
         logger.error(f"Traceback: {traceback.format_exc()}")
         return None
 
-def fit_config(server_round: int)->Dict[str, fl.common.Scalar]:
+def fit_config(server_round: int, local_epochs: int)->Dict[str, fl.common.Scalar]:
     """Per-round training config broadcast to clients."""
     config = {
         "server_round": server_round,
-        "local_epochs": 6,
+        "local_epochs": local_epochs,
         "learning_rate": 1e-3,
         "weight_decay": 1e-4,
         "loss_function": "cross_entropy",
@@ -636,6 +636,7 @@ def create_server_strategy(
     fraction_evaluate: float,
     model_name: str = "customcnn",
     num_classes: int,
+    local_epochs: int,
 ) -> MedicalFLStrategy:
     """Create FL server strategy with initial model parameters."""
     
@@ -653,7 +654,7 @@ def create_server_strategy(
         min_fit_clients=min_clients,
         min_evaluate_clients=1,
         min_available_clients=min_clients,
-        on_fit_config_fn=fit_config,
+        on_fit_config_fn=lambda server_round: fit_config(server_round, local_epochs),
         on_evaluate_config_fn=evaluate_config,
         initial_parameters=initial_parameters,
         fit_metrics_aggregation_fn=weighted_average,
@@ -708,9 +709,9 @@ def main():
     parser.add_argument("--fraction-evaluate", type=float, default=1.0, help="Fraction of clients to evaluate each round")
     parser.add_argument("--model", type=str, default="customcnn", choices=["mobilenetv3", "hybridmodel", "resnet50", "customcnn", "hybridswin"])
     parser.add_argument("--num-classes", type=int, default=3)
+    parser.add_argument("--local-epochs", type=int, default=6, help="Number of local epochs per round")  # Add this line
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
-    parser.add_argument("--expected-clients",type=int,default=None, help="How many clients you expect to connect (for logs). Defaults to --min-clients.",
-)
+    parser.add_argument("--expected-clients",type=int,default=None, help="How many clients you expect to connect (for logs). Defaults to --min-clients.")
     args = parser.parse_args()
 
     if args.expected_clients is None:
@@ -738,6 +739,7 @@ def main():
             fraction_evaluate=args.fraction_evaluate,
             model_name=args.model,
             num_classes=args.num_classes,
+            local_epochs=args.local_epochs  # Pass the local_epochs here
         )
         client_manager = LoggingClientManager(expected_clients=args.expected_clients)
 
@@ -779,6 +781,7 @@ def main():
                 logger.warning("No rounds completed")
         except Exception as e:
             logger.error(f"Cleanup error: {e}")
+
 
 if __name__ == "__main__":
     try:
