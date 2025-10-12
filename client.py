@@ -499,14 +499,12 @@
 import os
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 
-#gRPC keepalive / message-size hardening (safe defaults) ----
 os.environ.setdefault("GRPC_KEEPALIVE_TIME_MS", "30000")                # ping every 30s
 os.environ.setdefault("GRPC_KEEPALIVE_TIMEOUT_MS", "10000")             # wait 10s for ACK
 os.environ.setdefault("GRPC_HTTP2_MAX_PINGS_WITHOUT_DATA", "0")         # allow pings without data
 os.environ.setdefault("GRPC_KEEPALIVE_PERMIT_WITHOUT_CALLS", "1")       # ping even without active calls
 os.environ.setdefault("GRPC_MAX_RECEIVE_MESSAGE_LENGTH", str(200*1024*1024))  # 200 MB
 os.environ.setdefault("GRPC_MAX_SEND_MESSAGE_LENGTH",    str(200*1024*1024))  # 200 MB
-# ------------------------------------------------------------------
 
 import logging, warnings
 logging.getLogger("tensorflow").setLevel(logging.ERROR)
@@ -616,7 +614,6 @@ def _auc_trapz(y: List[float]) -> float:
     y = np.asarray(y, dtype=np.float32)
     x = np.linspace(0, 1, len(y), dtype=np.float32)
     return float(np.trapz(y, x))
-# ====================================================================
 
 
 class MedicalFLClient(fl.client.NumPyClient):
