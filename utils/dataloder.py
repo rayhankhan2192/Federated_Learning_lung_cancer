@@ -195,7 +195,7 @@ def create_data_loaders(data_dir: str,
                        test_split: float = 0.1,
                        image_size: Tuple[int, int] = (224, 224),
                        num_workers: int = 1,
-                       pin_memory: bool = True) -> Tuple[DataLoader, DataLoader, DataLoader]:
+                       pin_memory: bool = False) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """
     Create train, validation, and test data loaders with proper medical image handling
     
