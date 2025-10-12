@@ -612,8 +612,10 @@ def _deletion_curve_scores(model: nn.Module, x: torch.Tensor, heat: np.ndarray, 
 
 def _auc_trapz(y: List[float]) -> float:
     y = np.asarray(y, dtype=np.float32)
-    x = np.linspace(0, 1, len(y), dtype=np.float32)
-    return float(np.trapz(y, x))
+    if y.size < 2:
+        return 0.0
+    x = np.linspace(0.0, 1.0, y.size, dtype=np.float32)
+    return float(np.trapezoid(y, x))
 
 
 class MedicalFLClient(fl.client.NumPyClient):
