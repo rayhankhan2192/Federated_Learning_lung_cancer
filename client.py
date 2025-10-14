@@ -171,7 +171,7 @@ class MedicalFLClient(fl.client.NumPyClient):
             val_split=0.1,
             test_split=0.1,
             image_size=(224, 224),
-            num_workers=0
+            num_workers=4
         )
 
         # Class weights
