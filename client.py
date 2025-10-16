@@ -947,7 +947,7 @@ def main():
     parser.add_argument("--train-local", action="store_true", help="Run local training only (no FL server)")
     parser.add_argument("--batch-size", type=int, default=16, help="Batch size (CPU-only: 32 for ResNet/DenseNet, 64 for small CNN/EfficientNetB0)")
     parser.add_argument("--local-epochs", type=int, default=50, help="Local epochs per round")
-    parser.add_argument("--num-workers", type=int, default=3, help="DataLoader workers (set 0 if problems)")
+    parser.add_argument("--num-workers", type=int, default=0, help="DataLoader workers (set 0 if problems)")
     args = parser.parse_args()
 
     if not os.path.exists(args.data_dir):
