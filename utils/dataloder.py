@@ -189,7 +189,7 @@ def get_medical_transforms(image_size: Tuple[int, int] = (224, 224),
 
 
 def create_data_loaders(data_dir: str, 
-                       batch_size: int = 32, 
+                       batch_size: int = 16, 
                        train_split: float = 0.8,
                        val_split: float = 0.1,
                        test_split: float = 0.1,
@@ -340,7 +340,7 @@ if __name__ == "__main__":
 
     train_loader, val_loader, test_loader = create_data_loaders(
         data_dir=DATA_DIR,
-        batch_size=32,
+        batch_size=16,
         image_size=(224, 224),
         num_workers=0,     # Set 0 for Windows if multiprocess errors
         pin_memory=False   # You can turn on if using GPU

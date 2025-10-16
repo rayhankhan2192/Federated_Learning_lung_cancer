@@ -71,7 +71,7 @@ def fit_config(server_round: int, local_epochs: int) -> Dict[str, fl.common.Scal
         "optimizer": "adamw",
         "scheduler": "plateau",
         "use_scheduler": True,
-        "batch_size": 32,
+        "batch_size": 16,
         "xai_probe": True,
         "xai_samples": 16,
         "xai_save_k": 0,
