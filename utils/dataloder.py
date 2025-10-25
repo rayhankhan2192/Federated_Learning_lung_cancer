@@ -277,7 +277,6 @@ def create_data_loaders(data_dir: str,
         num_workers=num_workers,
         pin_memory=pin_memory
     )
-    
     test_loader = DataLoader(
         test_dataset,
         batch_size=batch_size,

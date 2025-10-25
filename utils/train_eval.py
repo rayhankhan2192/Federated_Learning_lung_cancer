@@ -71,7 +71,6 @@ class ModelMetrics:
             'recall_weighted': recall_weighted,
             'f1_weighted': f1_weighted
         }
-
         # Per-class metrics
         for i, class_name in enumerate(self.class_names):
             metrics[f'{class_name.lower()}_precision'] = precision[i] if i < len(precision) else 0.0

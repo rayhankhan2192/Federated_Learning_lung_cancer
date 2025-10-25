@@ -122,6 +122,7 @@ class MedicalFLStrategy(fl.server.strategy.FedAvg):
       - best/last global checkpoint saving
       - detailed round logging & plots
       - optional XAI metrics aggregation
+      
     """
     def __init__(
         self,
