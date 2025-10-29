@@ -2,3 +2,13 @@ DataSet/
 venv/
 GarbageCollection/
 __pycache__/
+
+
+models/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+migrations/
+Result/
+predicted_outputs/

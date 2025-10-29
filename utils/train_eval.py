@@ -214,82 +214,121 @@ class ModelTrainer:
         return metrics
 
     def train(self, train_loader: DataLoader, val_loader: DataLoader, 
-              num_epochs: int = 50, learning_rate: float = 0.001,
-              weight_decay: float = 1e-4, class_weights: Optional[torch.Tensor] = None,
-              use_scheduler: bool = True, patience: int = 10) -> Dict:
-        """Complete training loop"""
+          num_epochs: int = 50, learning_rate: float = 0.001,
+          weight_decay: float = 1e-4, class_weights: Optional[torch.Tensor] = None,
+          use_scheduler: bool = True, patience: int = 10,
+          criterion: Optional[nn.Module] = None,
+          optimizer_name: str = 'adamw',
+          scheduler_name: str = 'plateau') -> Dict:
+        """
+        Complete training loop with detailed logging, scheduler, early stopping,
+        and support for external criterion and optimizer config.
+        """
 
-        # Changed to AdamW for better performance
-        optimizer = optim.AdamW(self.model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-        
-        if class_weights is not None:
-            criterion = nn.CrossEntropyLoss(weight=class_weights.to(self.device))       
-        else:
-            criterion = nn.CrossEntropyLoss()
-        
-        # Setup scheduler
+        #Optimizer and Scheduler
+        optimizer = get_optimizer(self.model, optimizer_name, learning_rate, weight_decay)
+
         if use_scheduler:
-            scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer, mode='min', factor=0.5, patience=7, verbose=True
-            )
-        
-        # Early stopping
-        early_stopping = EarlyStopping(patience=patience, mode='min')
-        
+            scheduler = get_scheduler(optimizer, scheduler_name)
+
+        #Loss Function
+        if criterion is None:
+            if class_weights is not None:
+                criterion = nn.CrossEntropyLoss(weight=class_weights.to(self.device))
+            else:
+                criterion = nn.CrossEntropyLoss()
+
         best_val_loss = float('inf')
         best_model_state = None
-        
-        logger.info("Starting training...")
-        start_time = time.time()
+        early_stopping = EarlyStopping(patience=patience, mode='min')
+
+        logger.info(f"Starting training loop with optimizer={optimizer_name}, scheduler={scheduler_name if use_scheduler else 'None'}")
+
+        total_loss = 0.0
+        total_samples = 0
+        correct_predictions = 0
 
         for epoch in range(num_epochs):
-            epoch_start = time.time()
+            self.model.train()
+            epoch_loss = 0.0
+            epoch_samples = 0
+            epoch_correct = 0
 
-            # Training phase
-            train_metrics = self.train_epoch(train_loader, optimizer, criterion, epoch)
+            for batch_idx, (data, target) in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1} - Training")):
+                data, target = data.to(self.device), target.to(self.device)
 
-            # Validation phase
+                optimizer.zero_grad()
+                outputs = self.model(data)
+                loss = criterion(outputs, target)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                optimizer.step()
+
+                epoch_loss += loss.item()
+                epoch_samples += data.size(0)
+                _, predicted = torch.max(outputs.data, 1)
+                epoch_correct += (predicted == target).sum().item()
+
+                global_step = epoch * len(train_loader) + batch_idx
+                self.writer.add_scalar('Train/BatchLoss', loss.item(), global_step)
+
+            avg_epoch_loss = epoch_loss / len(train_loader)
+            epoch_accuracy = epoch_correct / epoch_samples
+
+            #Validation
             val_metrics = self.validate_epoch(val_loader, criterion, epoch)
+            val_loss = val_metrics['loss']
 
-            # Learning rate scheduling
+            #Scheduler Step
             if use_scheduler:
-                scheduler.step(val_metrics['loss'])
+                if scheduler_name.lower() == 'plateau':
+                    scheduler.step(val_loss)
+                else:
+                    scheduler.step()
 
-            # Save best model
-            if val_metrics['loss'] < best_val_loss:
-                best_val_loss = val_metrics['loss']
-                best_model_state = self.model.state_dict().copy()
-                self.save_checkpoint(epoch, train_metrics, val_metrics, is_best=True)
+            logger.info(
+                f"Epoch {epoch+1}/{num_epochs} | "
+                f"Train Loss: {avg_epoch_loss:.4f}, Train Acc: {epoch_accuracy:.4f} | "
+                f"Val Loss: {val_loss:.4f}, Val Acc: {val_metrics['accuracy']:.4f} | "
+                f"LR: {optimizer.param_groups[0]['lr']:.6f}"
+            )
 
-            # Log metrics
-            self._log_epoch_metrics(epoch, train_metrics, val_metrics)
-            
-            # Store history
-            for key, value in train_metrics.items():
-                self.history[f'train_{key}'].append(value)
-            for key, value in val_metrics.items():
-                self.history[f'val_{key}'].append(value)
-            
-            # Early stopping check
-            if early_stopping(val_metrics['loss']):
+            self._log_epoch_metrics(epoch, {
+                'loss': avg_epoch_loss,
+                'accuracy': epoch_accuracy
+            }, val_metrics)
+
+            self.history['train_loss'].append(avg_epoch_loss)
+            self.history['train_accuracy'].append(epoch_accuracy)
+            self.history['val_loss'].append(val_loss)
+            self.history['val_accuracy'].append(val_metrics['accuracy'])
+            self.history['val_f1_macro'].append(val_metrics['f1_macro'])
+
+            #Best Model Checkpoint
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                best_model_state = self.model.state_dict()
+                self.save_checkpoint(epoch, {'loss': avg_epoch_loss, 'accuracy': epoch_accuracy}, val_metrics, is_best=True)
+            elif early_stopping(val_loss):
                 logger.info(f"Early stopping triggered at epoch {epoch+1}")
                 break
-            
-            epoch_time = time.time() - epoch_start
-            logger.info(f"Epoch {epoch+1}/{num_epochs} completed in {epoch_time:.2f}s")
-        
-        # Load best model
+
+            total_loss += epoch_loss
+            total_samples += epoch_samples
+            correct_predictions += epoch_correct
+
         if best_model_state is not None:
             self.model.load_state_dict(best_model_state)
-            logger.info("Loaded best model weights")
+            logger.info("Best model weights loaded.")
 
-        total_time = time.time() - start_time
-        logger.info(f"Training completed in {total_time:.2f}s")
-
-        # Close tensorboard writer
+        logger.info("Training loop completed.")
         self.writer.close()
-        
+
+        self.plot_training_history(metrics=['loss'], save_path=os.path.join(self.save_dir, 'loss_curve.png'))
+        self.plot_training_history(metrics=['accuracy'], save_path=os.path.join(self.save_dir, 'accuracy_curve.png'))
+
         return self.history
+
     
 
     def evaluate(self, test_loader: DataLoader) -> Dict:
@@ -345,7 +384,7 @@ class ModelTrainer:
             save_path = os.path.join(self.save_dir, 'confusion_matrix.png')
         
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.show()
+        # plt.show()
 
     def plot_training_history(self, metrics: List[str] = ['loss', 'accuracy'], save_path: str = None):
         """Plot training history"""
@@ -372,7 +411,7 @@ class ModelTrainer:
             save_path = os.path.join(self.save_dir, 'training_history.png')
         
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.show()
+        # plt.show()
 
 
     def save_checkpoint(self, epoch: int, train_metrics: Dict, val_metrics: Dict, is_best: bool = False):
@@ -454,7 +493,7 @@ class ModelTrainer:
                        f"Recall={metrics.get(f'{class_key}_recall', 0):.4f}")
             
 
-def get_optimizer(model: nn.Module, optimizer_name: str = 'adam',
+def get_optimizer(model: nn.Module, optimizer_name: str = 'adamw',
                  learning_rate: float = 0.001, weight_decay: float = 1e-4) -> optim.Optimizer:
     """Get optimizer for training"""
     if optimizer_name.lower() == 'adamw':
@@ -475,4 +514,5 @@ def get_scheduler(optimizer: optim.Optimizer, scheduler_name: str = 'plateau'):
     elif scheduler_name.lower() == 'step':
         return optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
     else:
-        return None
+        raise ValueError(f"Unsupported scheduler: {scheduler_name}")
+

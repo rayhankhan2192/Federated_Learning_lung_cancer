@@ -169,68 +169,19 @@ def get_medical_transforms(image_size: Tuple[int, int] = (224, 224),
     if subset == 'train':
         # Training augmentations - medical image specific
         transform = A.Compose([
-            # Geometric transforms
-            A.Resize(height=image_size[0], width=image_size[1], interpolation=cv2.INTER_CUBIC),
-            A.RandomRotate90(p=0.5),
-            A.Rotate(limit=15, interpolation=cv2.INTER_CUBIC, p=0.7),
+            A.Resize(224, 224),
             A.HorizontalFlip(p=0.5),
-            A.VerticalFlip(p=0.3),
-            A.ShiftScaleRotate(
-                shift_limit=0.1, 
-                scale_limit=0.1, 
-                rotate_limit=15, 
-                interpolation=cv2.INTER_CUBIC,
-                p=0.6
-            ),
-            
-            # Elastic transform for medical images
-            A.ElasticTransform(
-                alpha=50, 
-                sigma=5, 
-                alpha_affine=5,
-                interpolation=cv2.INTER_CUBIC,
-                p=0.3
-            ),
-            
-            # Intensity transforms
-            A.RandomBrightnessContrast(
-                brightness_limit=0.2, 
-                contrast_limit=0.2, 
-                p=0.7
-            ),
-            A.RandomGamma(gamma_limit=(80, 120), p=0.5),
-            A.CLAHE(clip_limit=2.0, tile_grid_size=(8, 8), p=0.5),
-            
-            # Noise and blur
-            A.GaussNoise(var_limit=(10, 50), p=0.3),
-            A.GaussianBlur(blur_limit=(3, 5), p=0.3),
-            A.MotionBlur(blur_limit=3, p=0.2),
-            
-            # Grid distortion for medical realism
-            A.GridDistortion(num_steps=5, distort_limit=0.1, p=0.3),
-            
-            # Cutout for regularization
-            A.CoarseDropout(
-                max_holes=8, 
-                max_height=16, 
-                max_width=16, 
-                min_holes=1,
-                min_height=8, 
-                min_width=8,
-                fill_value=0, 
-                p=0.3
-            ),
-            
-            # Normalize and convert to tensor
-            A.Normalize(mean=[0.485], std=[0.229]),  # ImageNet grayscale stats
+            A.Rotate(limit=10, p=0.5),
+            A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.0, rotate_limit=0, p=0.5),
+            A.Normalize(mean=[0.5], std=[0.5]),
             ToTensorV2()
         ])
-    
+
     else:
         # Validation/Test transforms - minimal processing
         transform = A.Compose([
-            A.Resize(height=image_size[0], width=image_size[1], interpolation=cv2.INTER_CUBIC),
-            A.Normalize(mean=[0.485], std=[0.229]),
+            A.Resize(224, 224),
+            A.Normalize(mean=[0.5], std=[0.5]),
             ToTensorV2()
         ])
     
@@ -244,7 +195,7 @@ def create_data_loaders(data_dir: str,
                        test_split: float = 0.1,
                        image_size: Tuple[int, int] = (224, 224),
                        num_workers: int = 1,
-                       pin_memory: bool = True) -> Tuple[DataLoader, DataLoader, DataLoader]:
+                       pin_memory: bool = False) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """
     Create train, validation, and test data loaders with proper medical image handling
     

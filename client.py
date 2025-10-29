@@ -1,3 +1,9 @@
+import os
+os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0" 
+import logging, warnings
+logging.getLogger("tensorflow").setLevel(logging.ERROR)
+warnings.filterwarnings("ignore", category=UserWarning, module="tensorflow")
+
 import torch
 import torch.nn as nn
 import flwr as fl
@@ -7,6 +13,9 @@ import argparse
 import logging
 from typing import Dict, List, Tuple
 import os
+import cv2
+from typing import Optional
+
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -19,37 +28,133 @@ from utils.train_eval import ModelTrainer, ModelMetrics, get_optimizer
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+RESULTS_BASE_DIR = os.path.abspath(os.path.join("Result", "clientresult"))
+os.makedirs(RESULTS_BASE_DIR, exist_ok=True)
+
+
+
+def _normalize01(a: np.ndarray) -> np.ndarray:
+    a = a.astype(np.float32)
+    a -= a.min(); a += 1e-12
+    a /= a.max()
+    return a
+
+def _find_last_conv(module: nn.Module) -> nn.Conv2d:
+    last = None
+    for m in module.modules():
+        if isinstance(m, nn.Conv2d):
+            last = m
+    if last is None:
+        raise RuntimeError("No Conv2d layer found for Grad-CAM.")
+    return last
+
+class _GradCAM:
+    """Minimal, fast Grad-CAM for 1-ch CT; works with CustomCNN/ResNet50."""
+    def __init__(self, model: nn.Module, target_layer: nn.Module):
+        self.model = model.eval()
+        self.tl = target_layer
+        self.A = None
+        self.dA = None
+        self.ha = self.tl.register_forward_hook(self._hook_act)
+        self.hg = self.tl.register_full_backward_hook(self._hook_grad)
+
+    def _hook_act(self, module, inp, out):
+        self.A = out
+    def _hook_grad(self, module, gin, gout):
+        self.dA = gout[0]
+
+    def generate(self, x: torch.Tensor, class_idx: Optional[int] = None) -> np.ndarray:
+        self.model.zero_grad(set_to_none=True)
+        logits = self.model(x)
+        if class_idx is None:
+            class_idx = int(torch.argmax(logits, dim=1).item())
+        score = logits[0, class_idx]
+        score.backward(retain_graph=True)
+
+        A = self.A[0]                 # [C,H,W]
+        dA = self.dA[0]               # [C,H,W]
+        w = dA.mean(dim=(1,2))        # [C]
+        cam = torch.relu((w[:,None,None] * A).sum(dim=0)).detach().cpu().numpy()
+        return _normalize01(cam)
+
+    def close(self):
+        self.ha.remove(); self.hg.remove()
+
+def _overlay_on_gray(img_u8: np.ndarray, heat: np.ndarray, alpha: float = 0.35) -> np.ndarray:
+    """img_u8: HxW uint8; heat: HxW [0..1]; returns HxWx3 BGR (OpenCV)"""
+    H, W = img_u8.shape
+    heat_r = cv2.resize(heat, (W, H))
+    heatmap = cv2.applyColorMap((heat_r*255).astype(np.uint8), cv2.COLORMAP_JET)
+    base = cv2.cvtColor(img_u8, cv2.COLOR_GRAY2BGR)
+    return cv2.addWeighted(base, 1.0, heatmap, alpha, 0)
+
+def _deletion_curve_scores(model: nn.Module, x: torch.Tensor, heat: np.ndarray, steps: int = 10) -> List[float]:
+    """Iteratively zero most-important pixels; record target logit."""
+    device = next(model.parameters()).device
+    x = x.clone().to(device)
+    with torch.no_grad():
+        base_logits = model(x)[0]
+        cls = int(base_logits.argmax().item())
+        scores = [base_logits[cls].item()]
+
+    H, W = heat.shape
+    order = np.argsort(-heat.flatten())  # descending
+    k = int(np.ceil(len(order) / steps))
+    for s in range(steps):
+        idxs = order[s*k:(s+1)*k]
+        for idx in idxs:
+            y, z = idx // W, idx % W
+            x[0, 0, y, z] = 0.0
+        with torch.no_grad():
+            scores.append(model(x)[0, cls].item())
+    return scores
+
+def _auc_trapz(y: List[float]) -> float:
+    y = np.asarray(y, dtype=np.float32)
+    x = np.linspace(0, 1, len(y), dtype=np.float32)
+    return float(np.trapz(y, x))
+
+
 class MedicalFLClient(fl.client.NumPyClient):
     """
     Federated Learning client for medical image classification
     """
-    
-    def __init__(self, client_id: int, data_dir: str, device: torch.device,
-                 model_name: str = "customcnn", num_classes: int = 3,
-                 batch_size: int = 32, local_epochs: int = 8):
-        """
-        Initialize FL client
-        
-        Args:
-            client_id: Unique identifier for this client
-            data_dir: Path to client's local data
-            device: Computing device (CPU/GPU)
-            model_name: Model architecture to use
-            num_classes: Number of classification classes
-            batch_size: Batch size for training
-            local_epochs: Number of local training epochs per round
-        """
+    def __init__(
+        self, 
+        client_id: int, 
+        data_dir: str, 
+        device: torch.device,
+        model_name: str = "customcnn", 
+        num_classes: int = 3,
+        batch_size: int = 32, 
+        local_epochs: int = 8,
+        results_base_dir: str = RESULTS_BASE_DIR,
+    ):
         self.client_id = client_id
         self.data_dir = data_dir
         self.device = device
         self.num_classes = num_classes
         self.batch_size = batch_size
         self.local_epochs = local_epochs
-        
-        # Initialize model
+
+        self.results_base_dir = results_base_dir
+        os.makedirs(self.results_base_dir, exist_ok=True)
+        self.client_root = os.path.join(self.results_base_dir, f"client_{client_id}")
+        os.makedirs(self.client_root, exist_ok=True)
+        self.ckpt_dir     = os.path.join(self.client_root, "checkpoints")
+        self.log_dir      = os.path.join(self.client_root, "logs")
+        self.xai_dir      = os.path.join(self.client_root, "xai")
+        self.pred_dir     = os.path.join(self.client_root, "predictions")  
+        self.metrics_dir  = os.path.join(self.client_root, "metrics")       
+        for d in [self.ckpt_dir, self.log_dir, self.xai_dir, self.pred_dir, self.metrics_dir]:
+            os.makedirs(d, exist_ok=True)
+   
         self.model = get_model(model_name, num_classes, pretrained=True)
         self.model.to(device)
-        
+
+        # pick last conv once (for Grad-CAM, etc.)
+        self.target_layer = _find_last_conv(self.model)
+
         # Create data loaders
         logger.info(f"Client {client_id}: Loading data from {data_dir}")
         self.train_loader, self.val_loader, self.test_loader = create_data_loaders(
@@ -59,26 +164,29 @@ class MedicalFLClient(fl.client.NumPyClient):
             val_split=0.1,
             test_split=0.1,
             image_size=(224, 224),
-            num_workers=3
+            num_workers=0
         )
-        
-        # Calculate class weights for handling imbalanced data
+
+        # Class weights
         self.class_weights = get_class_weights(self.train_loader)
-        logger.info(f"Client {client_id}: Class weights: {self.class_weights}")
-        
-        # Initialize trainer
-        save_dir = f"client_{client_id}_checkpoints"
-        log_dir = f"client_{client_id}_logs"
-        self.trainer = ModelTrainer(self.model, device, save_dir, log_dir)
-        
-        # Training configuration
+        try:
+            cw_log = self.class_weights.tolist()  # if tensor/np
+        except Exception:
+            cw_log = self.class_weights
+        logger.info(f"Client {client_id}: Class weights: {cw_log}")
+
+        # Trainer now saves into the per-client folders
+        self.trainer = ModelTrainer(self.model, device, self.ckpt_dir, self.log_dir)
+
+        # Training config
         self.learning_rate = 0.001
         self.weight_decay = 1e-4
-        
+
         logger.info(f"Client {client_id} initialized successfully")
         logger.info(f"  - Training samples: {len(self.train_loader.dataset)}")
         logger.info(f"  - Validation samples: {len(self.val_loader.dataset)}")
         logger.info(f"  - Test samples: {len(self.test_loader.dataset)}")
+
     
     def get_parameters(self, config: Dict = None) -> List[np.ndarray]:
         """
@@ -105,98 +213,80 @@ class MedicalFLClient(fl.client.NumPyClient):
     
     def fit(self, parameters: List[np.ndarray], config: Dict) -> Tuple[List[np.ndarray], int, Dict]:
         """
-        Train model locally using federated learning round configuration
-        
+        Train model locally using federated learning round configuration.
+
         Args:
             parameters: Global model parameters from server
             config: Training configuration from server
-            
+
         Returns:
             Tuple of (updated_parameters, num_examples, metrics)
         """
         logger.info(f"Client {self.client_id}: Starting local training round")
-        
-        # Set global parameters
+
+        #Set global weights
         self.set_parameters(parameters)
-        
-        # Get training configuration from server
+
+        #Config extraction
         local_epochs = config.get("local_epochs", self.local_epochs)
         learning_rate = config.get("learning_rate", self.learning_rate)
+        weight_decay = config.get("weight_decay", 1e-4)
         loss_function = config.get("loss_function", "crossentropy")
-        
-        # Setup optimizer
-        optimizer = get_optimizer(self.model, "adam", learning_rate, self.weight_decay)
-        
-        # Setup loss function
+        optimizer_name = config.get("optimizer", "adamw")
+        scheduler_name = config.get("scheduler", "plateau")
+        use_scheduler = config.get("use_scheduler", True)
+
+        #Loss Function
         if loss_function == "focal":
             criterion = FocalLoss(alpha=1.0, gamma=2.0)
         elif loss_function == "label_smoothing":
             criterion = LabelSmoothingLoss(num_classes=self.num_classes, smoothing=0.1)
         else:
             criterion = nn.CrossEntropyLoss(weight=self.class_weights.to(self.device))
-        
-        # Local training
-        self.model.train()
-        total_loss = 0.0
-        total_samples = 0
-        correct_predictions = 0
-        
-        for epoch in range(local_epochs):
-            epoch_loss = 0.0
-            epoch_samples = 0
-            epoch_correct = 0
-            
-            for batch_idx, (data, target) in enumerate(self.train_loader):
-                data, target = data.to(self.device), target.to(self.device)
-                
-                optimizer.zero_grad()
-                outputs = self.model(data)
-                loss = criterion(outputs, target)
-                loss.backward()
-                
-                # Gradient clipping for stability
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                
-                optimizer.step()
-                
-                # Statistics
-                epoch_loss += loss.item()
-                epoch_samples += data.size(0)
-                _, predicted = torch.max(outputs.data, 1)
-                epoch_correct += (predicted == target).sum().item()
-            
-            epoch_accuracy = epoch_correct / epoch_samples
-            avg_epoch_loss = epoch_loss / len(self.train_loader)
-            
-            logger.info(f"Client {self.client_id} - Epoch {epoch+1}/{local_epochs}: "
-                       f"Loss: {avg_epoch_loss:.4f}, Accuracy: {epoch_accuracy:.4f}")
-            
-            total_loss += epoch_loss
-            total_samples += epoch_samples
-            correct_predictions += epoch_correct
-        
-        # Calculate final metrics
-        avg_loss = total_loss / (local_epochs * len(self.train_loader))
-        accuracy = correct_predictions / total_samples
-        
-        # Validate on local validation set
-        val_metrics = self._evaluate_local()
-        
-        # Prepare metrics to send to server
+
+        # Call ModelTrainer.train
+        train_history = self.trainer.train(
+            train_loader=self.train_loader,
+            val_loader=self.val_loader,
+            num_epochs=local_epochs,
+            learning_rate=learning_rate,
+            weight_decay=weight_decay,
+            class_weights=self.class_weights,
+            use_scheduler=use_scheduler,
+            patience=10,
+            criterion=criterion,
+            optimizer_name=optimizer_name,
+            scheduler_name=scheduler_name
+        )
+
+        # === Evaluation after training
+        test_metrics = self.trainer.evaluate(self.test_loader)
+
+        xai_metrics = self._xai_probe(self.val_loader, num_samples=16, save_k=3)
+
+        # === Save model (optional)
+        #RESULTS_BASE_DIR = f"client_{self.client_id}_best_model.pth"
+        best_model_path = os.path.join(self.ckpt_dir, f"client_{self.client_id}_best_model.pth")
+        torch.save(self.model.state_dict(), best_model_path)
+        logger.info(f"Client {self.client_id}: Best model saved to {best_model_path}")
+
+
+        # === Final Metrics
         metrics = {
-            "train_loss": avg_loss,
-            "train_accuracy": accuracy,
-            "val_loss": val_metrics["loss"],
-            "val_accuracy": val_metrics["accuracy"],
-            "val_f1": val_metrics["f1_macro"],
-            "num_examples": len(self.train_loader.dataset)
+            "train_loss": train_history["train_loss"][-1],
+            "train_accuracy": train_history["train_accuracy"][-1],
+            "val_loss": train_history["val_loss"][-1],
+            "val_accuracy": train_history["val_accuracy"][-1],
+            "val_f1": train_history["val_f1_macro"][-1],
+            "test_accuracy": test_metrics["accuracy"],
+            "test_f1": test_metrics["f1_macro"],
+            "num_examples": len(self.train_loader.dataset),
+            **xai_metrics, 
         }
-        
+
         logger.info(f"Client {self.client_id}: Local training completed")
-        logger.info(f"  - Train Loss: {avg_loss:.4f}, Train Acc: {accuracy:.4f}")
-        logger.info(f"  - Val Loss: {val_metrics['loss']:.4f}, Val Acc: {val_metrics['accuracy']:.4f}")
-        
         return self.get_parameters(), len(self.train_loader.dataset), metrics
+
     
     def evaluate(self, parameters: List[np.ndarray], config: Dict) -> Tuple[float, int, Dict]:
         """
@@ -216,6 +306,9 @@ class MedicalFLClient(fl.client.NumPyClient):
         
         # Evaluate on test set
         test_metrics = self.trainer.evaluate(self.test_loader)
+        # Optional: run a quick XAI probe during evaluate as well
+        xai_metrics = self._xai_probe(self.val_loader, num_samples=12, save_k=0)
+        test_metrics.update(xai_metrics)
         
         logger.info(f"Client {self.client_id}: Evaluation completed")
         logger.info(f"  - Test Accuracy: {test_metrics['accuracy']:.4f}")
@@ -268,6 +361,68 @@ class MedicalFLClient(fl.client.NumPyClient):
         metrics['loss'] = avg_loss
         
         return metrics
+    
+    def _xai_probe(self, loader, num_samples: int = 16, save_k: int = 3) -> Dict:
+        """
+        Runs Grad-CAM on a small subset, computes Deletion-AUC faithfulness,
+        and (optionally) saves a few overlays locally. Returns numeric metrics only.
+        """
+        self.model.eval()
+        device = self.device
+        cam_engine = _GradCAM(self.model, self.target_layer)
+
+        del_aucs, saved, seen = [], 0, 0
+
+        for data, target in loader:
+            # data: [B,1,H,W]
+            B = data.size(0)
+            for i in range(B):
+                x = data[i:i+1].to(device)  # [1,1,H,W]
+
+                # 1) predict class WITHOUT grads
+                with torch.no_grad():
+                    logits = self.model(x)
+                    pred_idx = int(torch.argmax(logits, dim=1).item())
+
+                # 2) generate CAM WITH grads enabled
+                with torch.enable_grad():
+                    # make sure graph can propagate grads
+                    x = x.requires_grad_(True)
+                    heat = cam_engine.generate(x, class_idx=pred_idx)  # [H,W], [0..1]
+
+                # 3) faithfulness (deletion curve) can be done without grads
+                scores = _deletion_curve_scores(self.model, x.detach(), heat, steps=10)
+                del_aucs.append(_auc_trapz(scores))
+
+                # 4) optionally save a few overlays locally
+                if saved < save_k:
+                    img = data[i, 0].cpu().numpy()
+                    img = (img - img.min()) / (img.max() - img.min() + 1e-12)
+                    img_u8 = (img * 255).astype(np.uint8)
+                    overlay_bgr = _overlay_on_gray(img_u8, heat, alpha=0.35)
+
+                    rnd = loader.__dict__.get("round", None)  # if you pass round in, else omit
+                    name = f"round_overlay_{saved+1}.png" if rnd is None else f"round{int(rnd):03d}_overlay_{saved+1}.png"
+                    out_path = os.path.join(self.xai_dir, name)
+                    cv2.imwrite(out_path, overlay_bgr)
+                    saved += 1
+
+                seen += 1
+                if seen >= num_samples:
+                    break
+            if seen >= num_samples:
+                break
+
+        cam_engine.close()
+
+        if not del_aucs:
+            return {"xai_del_auc_mean": 0.0, "xai_del_auc_std": 0.0}
+        return {
+            "xai_del_auc_mean": float(np.mean(del_aucs)),
+            "xai_del_auc_std": float(np.std(del_aucs)),
+        }
+
+
 
 def create_client(client_id: int, data_dir: str, model_name: str = "customcnn") -> MedicalFLClient:
     """
@@ -298,37 +453,13 @@ def create_client(client_id: int, data_dir: str, model_name: str = "customcnn") 
     
     return client
 
-# def main():
-#     """Main function to run FL client"""
-#     parser = argparse.ArgumentParser(description="Federated Learning Client for Medical Imaging")
-#     parser.add_argument("--client-id", type=int, default=1, help="Client ID")
-#     parser.add_argument("--data-dir", type=str, required=True, help="Path to client data directory")
-#     parser.add_argument("--server-address", type=str, default="localhost:8080", help="FL server address")
-#     parser.add_argument("--model", type=str, default="resnet18", choices=["resnet18", "resnet50"], help="Model architecture")
-    
-#     args = parser.parse_args()
-    
-#     # Validate data directory
-#     if not os.path.exists(args.data_dir):
-#         raise ValueError(f"Data directory not found: {args.data_dir}")
-    
-#     # Create client
-#     client = create_client(args.client_id, args.data_dir, args.model)
-    
-#     # Start FL client
-#     logger.info(f"Starting FL client {args.client_id} connecting to {args.server_address}")
-#     fl.client.start_numpy_client(
-#         server_address=args.server_address,
-#         client=client
-#     )
-
 def main():
     """Main function to run FL client"""
     parser = argparse.ArgumentParser(description="Federated Learning Client for Medical Imaging")
     parser.add_argument("--client-id", type=int, default=1, help="Client ID")
     parser.add_argument("--data-dir", type=str, required=True, help="Path to client data directory")
     parser.add_argument("--server-address", type=str, default="localhost:8080", help="FL server address")
-    parser.add_argument("--model", type=str, default="resnet18", choices=["resnet18", "resnet50", "customcnn"], help="Model architecture")
+    parser.add_argument("--model", type=str, default="customcnn", choices=["mobilenetv3", "hybridmodel", "resnet50", "customcnn", "hybridswin", "densenet121"], help="Model architecture")
     parser.add_argument("--train-local", action="store_true", help="Run local training only (no FL server)")
 
     args = parser.parse_args()
