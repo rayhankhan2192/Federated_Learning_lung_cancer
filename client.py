@@ -25,6 +25,8 @@ import torch.nn as nn
 import flwr as fl
 import grpc
 import cv2
+import matplotlib.pyplot as plt
+import torch.nn.functional as F
 
 from models.model_factory import get_model, FocalLoss, LabelSmoothingLoss
 from utils.dataloder import create_data_loaders, get_class_weights  # (spelling kept)
@@ -60,83 +62,203 @@ def _normalize01(a: np.ndarray) -> np.ndarray:
     a = a / amax
     return a
 
-def _find_last_conv(module: nn.Module) -> Optional[nn.Conv2d]:
-    last = None
-    for m in module.modules():
-        if isinstance(m, nn.Conv2d):
-            last = m
-    return last
+def _ensure_dir(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
 
-class _GradCAM:
-    """Minimal, fast Grad-CAM for single-image probe."""
-    def __init__(self, model: nn.Module, target_layer: nn.Module):
-        self.model = model.eval()
-        self.tl = target_layer
-        self.A = None
-        self.dA = None
-        self.ha = self.tl.register_forward_hook(self._hook_act)
-        self.hg = self.tl.register_full_backward_hook(self._hook_grad)
 
-    def _hook_act(self, module, inp, out):
-        self.A = out
+def find_last_conv_layer(model: torch.nn.Module) -> Optional[torch.nn.Module]:
+    """Return the last nn.Conv2d layer in the model, or None if not found."""
+    last_conv = None
+    for module in model.modules():
+        if isinstance(module, torch.nn.Conv2d):
+            last_conv = module
+    return last_conv
 
-    def _hook_grad(self, module, gin, gout):
-        self.dA = gout[0]
 
-    def generate(self, x: torch.Tensor, class_idx: Optional[int] = None) -> np.ndarray:
-        self.model.zero_grad(set_to_none=True)
-        logits = self.model(x)
+def compute_gradcam_pp(
+    model: torch.nn.Module,
+    x: torch.Tensor,
+    target_layer: torch.nn.Module,
+    class_idx: Optional[int] = None,
+) -> np.ndarray:
+    """
+    Compute Grad-CAM++ heatmap for a single image batch x (shape [1, C, H, W]).
+    Returns a numpy array of shape [H, W] normalized to [0,1].
+    """
+    activations: List[torch.Tensor] = []
+    gradients: List[torch.Tensor] = []
+
+    def forward_hook(module, inp, out):
+        activations.append(out.detach())
+
+    def backward_hook(module, grad_in, grad_out):
+        gradients.append(grad_out[0].detach())
+
+    handle_f = target_layer.register_forward_hook(forward_hook)
+    handle_b = target_layer.register_full_backward_hook(backward_hook)
+
+    try:
+        model.zero_grad(set_to_none=True)
+        
+        logits = model(x)
         if class_idx is None:
             class_idx = int(torch.argmax(logits, dim=1).item())
-        score = logits[0, class_idx]
-        score.backward(retain_graph=True)
+        
+        score = logits[:, class_idx]
+        score.backward(retain_graph=False)
 
-        A = self.A[0]               # [C,H,W]
-        dA = self.dA[0]             # [C,H,W]
-        w = dA.mean(dim=(1, 2))     # [C]
-        cam = torch.relu((w[:, None, None] * A).sum(dim=0)).detach().cpu().numpy()
-        return _normalize01(cam)
+        if not activations or not gradients:
+            raise RuntimeError("Hooks not triggered - check target_layer")
+        
+        A = activations[0][0]  # [C, H, W]
+        G = gradients[0][0]    # [C, H, W]
 
-    def close(self):
-        self.ha.remove()
-        self.hg.remove()
+        grads2 = G ** 2
+        grads3 = G ** 3
+        sum_activations = torch.sum(A, dim=(1, 2), keepdim=True)
 
-def _overlay_on_gray(img_u8: np.ndarray, heat: np.ndarray, alpha: float = 0.35) -> np.ndarray:
-    """img_u8: HxW uint8; heat: HxW [0..1]; returns HxWx3 BGR (OpenCV)."""
-    H, W = img_u8.shape
-    heat_r = cv2.resize(heat, (W, H))
-    heatmap = cv2.applyColorMap((heat_r * 255).astype(np.uint8), cv2.COLORMAP_JET)
-    base = cv2.cvtColor(img_u8, cv2.COLOR_GRAY2BGR)
-    return cv2.addWeighted(base, 1.0, heatmap, alpha, 0)
+        eps = 1e-7
+        alpha = grads2 / (2 * grads2 + sum_activations * grads3 + eps)
+        positive_gradients = F.relu(G)
+        weights = torch.sum(alpha * positive_gradients, dim=(1, 2))
 
-def _deletion_curve_scores(model: nn.Module, x: torch.Tensor, heat: np.ndarray, steps: int = 10) -> List[float]:
-    """Iteratively zero most-important pixels; record target logit."""
-    device = next(model.parameters()).device
-    x = x.clone().to(device)
+        cam = torch.sum(weights.view(-1, 1, 1) * A, dim=0)
+        cam = F.relu(cam)
+
+        cam_np = cam.detach().cpu().numpy()
+        cam_np = cam_np - cam_np.min()
+        if cam_np.max() > 0:
+            cam_np = cam_np / cam_np.max()
+        
+        return cam_np
+        
+    finally:
+        handle_f.remove()
+        handle_b.remove()
+        model.zero_grad(set_to_none=True)
+
+
+def compute_deletion_auc(
+    model: torch.nn.Module,
+    x: torch.Tensor,
+    cam: np.ndarray,
+    class_idx: int,
+    device: torch.device,
+    steps: int = 10,
+) -> float:
+    """
+    Deletion AUC faithfulness metric.
+    Lower values = better faithfulness (rapid confidence drop).
+    Expected range: 0.1-0.3 (good), 0.5-0.7 (moderate), >0.7 (poor).
+    """
+    model.eval()
+    
     with torch.no_grad():
-        base_logits = model(x)[0]
-        cls = int(base_logits.argmax().item())
-        scores = [base_logits[cls].item()]
+        x_mod = x.clone().to(device)
+        B, C, H, W = x_mod.shape
+        
+        if cam.shape != (H, W):
+            cam = cv2.resize(cam, (W, H))
+        
+        cam_flat = cam.reshape(-1)
+        indices = np.argsort(-cam_flat)
+        
+        num_pixels = H * W
+        pixels_per_step = max(num_pixels // steps, 1)
+        
+        mask = torch.ones((1, 1, H, W), device=device, dtype=x_mod.dtype)
+        scores: List[float] = []
+        
+        for step_i in range(steps + 1):
+            masked_input = x_mod * mask
+            
+            logits = model(masked_input)
+            probs = F.softmax(logits, dim=1)
+            score = float(probs[0, class_idx].item())
+            scores.append(score)
+            
+            if step_i == steps:
+                break
+            
+            start_idx = step_i * pixels_per_step
+            end_idx = min((step_i + 1) * pixels_per_step, num_pixels)
+            pixels_to_delete = indices[start_idx:end_idx]
+            
+            for pixel_idx in pixels_to_delete:
+                row = int(pixel_idx // W)
+                col = int(pixel_idx % W)
+                mask[0, 0, row, col] = 0.0
+        
+        fractions = np.linspace(0.0, 1.0, len(scores))
+        auc = float(np.trapz(scores, fractions))
+        
+        return auc
 
-    H, W = heat.shape
-    order = np.argsort(-heat.flatten())  # descending by importance
-    k = int(np.ceil(len(order) / steps))
-    for s in range(steps):
-        idxs = order[s * k:(s + 1) * k]
-        for idx in idxs:
-            y, z = idx // W, idx % W
-            x[0, 0, y, z] = 0.0
-        with torch.no_grad():
-            scores.append(model(x)[0, cls].item())
-    return scores
 
-def _auc_trapz(y: List[float]) -> float:
-    y = np.asarray(y, dtype=np.float32)
-    if y.size < 2:
-        return 0.0
-    x = np.linspace(0.0, 1.0, y.size, dtype=np.float32)
-    # NumPy >=1.20 has trapezoid; this name is stable in 1.26+
-    return float(np.trapezoid(y, x))
+def save_gradcam_overlay(
+    x: torch.Tensor,
+    cam: np.ndarray,
+    out_dir: str,
+    round_num: int,
+    idx: int,
+    true_label: int,
+    pred_label: int,
+    auc: Optional[float] = None,
+) -> None:
+    """Save an overlay of Grad-CAM++ heatmap on top of the input image."""
+    _ensure_dir(out_dir)
+
+    img = x[0].detach().cpu()
+    
+    if img.shape[0] == 1:
+        base = img[0].numpy()
+        is_grayscale = True
+    else:
+        base = img.permute(1, 2, 0).numpy()
+        is_grayscale = False
+
+    base = base - base.min()
+    if base.max() > 0:
+        base = base / (base.max() + 1e-8)
+
+    cam_resized = cv2.resize(cam, (base.shape[1], base.shape[0]))
+
+    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+    
+    if is_grayscale:
+        axes[0].imshow(base, cmap="gray")
+    else:
+        axes[0].imshow(base)
+    axes[0].set_title("Original")
+    axes[0].axis("off")
+    
+    axes[1].imshow(cam_resized, cmap="jet")
+    axes[1].set_title("Grad-CAM++")
+    axes[1].axis("off")
+    
+    if is_grayscale:
+        axes[2].imshow(base, cmap="gray")
+    else:
+        axes[2].imshow(base)
+    axes[2].imshow(cam_resized, cmap="jet", alpha=0.5)
+    
+    match_symbol = "✓" if pred_label == true_label else "✗"
+    title = f"Overlay {match_symbol}\nTrue: {true_label}, Pred: {pred_label}"
+    if auc is not None:
+        title += f"\nDel-AUC: {auc:.4f}"
+    axes[2].set_title(title)
+    axes[2].axis("off")
+
+    plt.tight_layout()
+    
+    fname = f"round{round_num:03d}_sample{idx:03d}_true{true_label}_pred{pred_label}"
+    if auc is not None:
+        fname += f"_auc{auc:.3f}"
+    fname += ".png"
+    
+    save_path = os.path.join(out_dir, fname)
+    plt.savefig(save_path, bbox_inches="tight", dpi=150)
+    plt.close(fig)
 
 
 # Flower Client
@@ -181,7 +303,7 @@ class MedicalFLClient(fl.client.NumPyClient):
         self.model.to(device)
 
         # Choose a conv layer for Grad-CAM (optional)
-        self.target_layer = _find_last_conv(self.model)
+        self.target_layer = find_last_conv_layer(self.model)
         if self.target_layer is None:
             logger.warning("No Conv2d layer found for Grad-CAM. XAI probe will be skipped.")
 
@@ -352,6 +474,7 @@ class MedicalFLClient(fl.client.NumPyClient):
         logger.info(f"Client {self.client_id}: Evaluation completed")
         logger.info(f"  - Test Accuracy: {test_metrics['accuracy']:.4f}")
         logger.info(f"  - Test F1 (Macro): {test_metrics['f1_macro']:.4f}")
+        logger.info(f"  - XAI Del-AUC Mean: {test_metrics['xai_del_auc_mean']:.4f}")
 
         return (
             float(test_metrics.get("loss", 0.0)),
@@ -359,59 +482,132 @@ class MedicalFLClient(fl.client.NumPyClient):
             {k: (float(v) if isinstance(v, (int, float, np.floating)) else v) for k, v in test_metrics.items()},
         )
 
-    def _xai_probe(self, loader, num_samples: int = 16, save_k: int = 3) -> Dict:
+    def _xai_probe(self, loader, num_samples: int = 16, save_k: int = 3, epoch: int = 0) -> Dict[str, float]:
+        """
+        Run Grad-CAM++ + Deletion AUC probe on validation set.
+        
+        Returns:
+            Dictionary with XAI metrics:
+            - "xai_del_auc_mean": Mean deletion AUC (lower = better)
+            - "xai_del_auc_std": Standard deviation of deletion AUC
+        """
         if self.target_layer is None:
-            return {"xai_del_auc_mean": 0.0, "xai_del_auc_std": 0.0}
+            logger.warning("No target_layer found, skipping XAI probe.")
+            return {
+                "xai_del_auc_mean": float("nan"),
+                "xai_del_auc_std": float("nan")
+            }
 
         self.model.eval()
-        device = self.device
-        cam_engine = _GradCAM(self.model, self.target_layer)
+        del_aucs: List[float] = []
+        seen = 0
+        saved = 0
 
-        del_aucs, saved, seen = [], 0, 0
-        for data, _ in loader:
-            B = data.size(0)
-            for i in range(B):
-                x = data[i:i+1].to(device)  # [1, C, H, W]
+        _ensure_dir(self.xai_dir)
 
-                # Predict class without grads
+        for images, labels in loader:
+            images = images.to(self.device)
+            labels = labels.to(self.device)
+            batch_size = images.size(0)
+
+            for i in range(batch_size):
+                if seen >= num_samples:
+                    break
+
+                x = images[i:i+1]  # [1, C, H, W]
+                y_true = int(labels[i].item())
+
+                # Get prediction (without gradients)
                 with torch.no_grad():
                     logits = self.model(x)
                     pred_idx = int(torch.argmax(logits, dim=1).item())
 
-                # CAM with grads
-                with torch.enable_grad():
-                    x = x.requires_grad_(True)
-                    heat = cam_engine.generate(x, class_idx=pred_idx)  # [H,W], [0..1]
+                # Use predicted class for CAM
+                class_idx = pred_idx
 
-                # Faithfulness metric (deletion AUC)
-                scores = _deletion_curve_scores(self.model, x.detach(), heat, steps=10)
-                del_aucs.append(_auc_trapz(scores))
+                # 1. Compute Grad-CAM++ heatmap (requires gradients)
+                x_cam = x.clone().requires_grad_(True)
+                try:
+                    cam = compute_gradcam_pp(
+                        model=self.model,
+                        x=x_cam,
+                        target_layer=self.target_layer,
+                        class_idx=class_idx
+                    )
+                except Exception as e:
+                    logger.error(f"Grad-CAM failed for sample {seen}: {e}")
+                    seen += 1
+                    continue
 
-                # Save a few overlays
-                if save_k and saved < save_k:
-                    img = data[i, 0].cpu().numpy()
-                    img = (img - img.min()) / (img.max() - img.min() + 1e-12)
-                    img_u8 = (img * 255).astype(np.uint8)
-                    overlay_bgr = _overlay_on_gray(img_u8, heat, alpha=0.35)
-                    name = f"round_overlay_{saved + 1}.png"
-                    out_path = os.path.join(self.xai_dir, name)
-                    cv2.imwrite(out_path, overlay_bgr)
-                    saved += 1
+                # 2. Compute Deletion AUC (no gradients needed)
+                try:
+                    del_auc = compute_deletion_auc(
+                        model=self.model,
+                        x=x.detach(),
+                        cam=cam,
+                        class_idx=class_idx,
+                        device=self.device,
+                        steps=10,
+                    )
+                    del_aucs.append(del_auc)
+                except Exception as e:
+                    logger.error(f"Deletion AUC failed for sample {seen}: {e}")
+                    seen += 1
+                    continue
+
+                # 3. Save visualization
+                if saved < save_k:
+                    try:
+                        save_gradcam_overlay(
+                            x=x.detach(),
+                            cam=cam,
+                            out_dir=self.xai_dir,
+                            round_num=epoch,
+                            idx=seen,
+                            true_label=y_true,
+                            pred_label=pred_idx,
+                            auc=del_auc,
+                        )
+                        saved += 1
+                    except Exception as e:
+                        logger.error(f"Failed to save overlay for sample {seen}: {e}")
 
                 seen += 1
-                if seen >= num_samples:
-                    break
+
             if seen >= num_samples:
                 break
 
-        cam_engine.close()
-
+        # Compute statistics
         if not del_aucs:
-            return {"xai_del_auc_mean": 0.0, "xai_del_auc_std": 0.0}
-        return {
-            "xai_del_auc_mean": float(np.mean(del_aucs)),
-            "xai_del_auc_std": float(np.std(del_aucs)),
+            logger.warning("No valid XAI samples computed!")
+            return {
+                "xai_del_auc_mean": float("nan"),
+                "xai_del_auc_std": float("nan")
+            }
+
+        arr = np.asarray(del_aucs, dtype=float)
+        metrics = {
+            "xai_del_auc_mean": float(arr.mean()),
+            "xai_del_auc_std": float(arr.std()),
         }
+        
+        # Add interpretive feedback
+        if metrics['xai_del_auc_mean'] < 0.4:
+            quality = "Good"
+        elif metrics['xai_del_auc_mean'] < 0.6:
+            quality = "Moderate"
+        else:
+            quality = "Poor"
+        
+        logger.info(
+            f"XAI Probe (Round {epoch}): "
+            f"Deletion AUC Mean={metrics['xai_del_auc_mean']:.4f} "
+            f"(±{metrics['xai_del_auc_std']:.4f}) "
+            f"[n={len(del_aucs)} samples] "
+            f"{quality}"
+        )
+        
+        return metrics
 
 
 def create_client(client_id: int, data_dir: str, model_name: str = "customcnn",
@@ -496,7 +692,6 @@ def main():
 
     logger.info(f"Starting FL client {args.client_id} connecting to {args.server_address}")
     run_flower(args.server_address, client)
-
 
 if __name__ == "__main__":
     main()
