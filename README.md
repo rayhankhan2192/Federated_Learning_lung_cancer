@@ -33,10 +33,11 @@ Unlike standard black-box FL systems, this framework quantifies *why* prediction
 
 ### 4. Deep Learning Backbones
 Modular design supporting multiple state-of-the-art architectures via `model_factory.py`:
-* **DenseNet-121** (Recommended for best balance of F1/Faithfulness)
+* **DenseNet-121** (Primary Baseline average lightweight)
+* **ViT-ResNet-Hybrid**(Secondary Baseline need more computational power)
+* **SwinT-DenseNet-Hybrid**
 * **ResNet-50**
-* **MobileNetV3**
-* **Custom CNN** (Lightweight baseline)
+* **Custom CNN** 
 
 ---
 
