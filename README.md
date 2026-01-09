@@ -5,7 +5,7 @@
 [![Python](https://img.shields.io/badge/Python-3.8%2B-blue.svg)](https://www.python.org/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-ee4c2c.svg)](https://pytorch.org/)
 [![Flower](https://img.shields.io/badge/Flower-1.0%2B-orange.svg)](https://flower.dev/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)]()
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 ## 📜 Abstract
 
@@ -139,3 +139,8 @@ metrics/: Confusion matrices and detailed classification reports (Precision, Rec
 
 checkpoints/: Local model weights before aggregation.
 ```
+
+
+## 📄 License
+
+This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
