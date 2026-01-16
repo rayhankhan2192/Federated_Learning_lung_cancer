@@ -40,7 +40,7 @@ def get_init_parameters(model_name: str, num_classes: int) -> fl.common.Paramete
         if models_dir not in sys.path:
             sys.path.insert(0, models_dir)
 
-        model = get_model(model_name, num_classes, pretrained=False)
+        model = get_model(model_name, num_classes, pretrained=True)
 
         with torch.no_grad():
             parameters = [v.cpu().numpy() for _, v in model.state_dict().items()]

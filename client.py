@@ -187,7 +187,7 @@ def compute_deletion_auc(
             for pixel_idx in pixels_to_delete:
                 row = int(pixel_idx // W)
                 col = int(pixel_idx % W)
-                mask[0, 0, row, col] = 0.0
+                x_mod[0, :, row, col] = -1.0  # assuming input normalized in [-1, 1]
         
         fractions = np.linspace(0.0, 1.0, len(scores))
         auc = float(np.trapz(scores, fractions))
