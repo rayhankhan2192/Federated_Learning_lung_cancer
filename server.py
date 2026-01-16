@@ -526,25 +526,22 @@ class MedicalFLStrategy(fl.server.strategy.FedAvg):
         axes[0, 0].plot(rounds, self.history["train_loss"], label="Train Loss", linewidth=2, marker="o")
         axes[0, 0].plot(rounds, self.history["val_loss"], label="Val Loss", linewidth=2, marker="s")
         if self.history["test_loss"]:
-            # FIX: Slice the rounds to match the number of available test loss points
             num_test_points = len(self.history["test_loss"])
             axes[0, 0].plot(rounds[:num_test_points], self.history["test_loss"], label="Test Loss", linewidth=2, marker="^")
         axes[0, 0].set_title("Loss")
 
-        # Acc
+        # Accuracy
         axes[0, 1].plot(rounds, self.history["train_accuracy"], label="Train Acc", linewidth=2, marker="o")
         axes[0, 1].plot(rounds, self.history["val_accuracy"], label="Val Acc", linewidth=2, marker="s")
         if self.history["test_accuracy"]:
-            # FIX: Slice the rounds to match the number of available test accuracy points
             num_test_points = len(self.history["test_accuracy"])
             axes[0, 1].plot(rounds[:num_test_points], self.history["test_accuracy"], label="Test Acc", linewidth=2, marker="^")
         axes[0, 1].set_title("Accuracy")
 
-        # F1
+        # F1-Score
         axes[0, 2].plot(rounds, self.history["train_f1"], label="Train F1", linewidth=2, marker="o")
         axes[0, 2].plot(rounds, self.history["val_f1"], label="Val F1", linewidth=2, marker="s")
         if self.history["test_f1"]:
-            # FIX: Slice the rounds to match the number of available test F1 points
             num_test_points = len(self.history["test_f1"])
             axes[0, 2].plot(rounds[:num_test_points], self.history["test_f1"], label="Test F1", linewidth=2, marker="^")
         axes[0, 2].set_title("F1-Score")
@@ -558,25 +555,32 @@ class MedicalFLStrategy(fl.server.strategy.FedAvg):
             axes[1, 1].plot(rounds, self.history["aggregation_time"], linewidth=2, marker="d", label="Agg Time (s)")
             axes[1, 1].set_title("Aggregation Time (s)")
 
-        # Data distribution (latest round)
+        # Data distribution
         if self.history["client_data_sizes"]:
             latest = self.history["client_data_sizes"][-1]
             labels = [f"C{i+1}" for i in range(len(latest))]
             axes[1, 2].pie(latest, labels=labels, autopct="%1.1f%%", startangle=90)
             axes[1, 2].set_title("Data Distribution (latest)")
 
+        # Style and Legends
         for ax in axes.ravel():
             ax.grid(True, alpha=0.3)
             handles, labels = ax.get_legend_handles_labels()
             if handles:
                 ax.legend(loc="best")
 
+        # --- NEW: Add Super Title ---
+        fig.suptitle(f"Federated Learning Training Metrics ({self.model_name})", fontsize=20, y=0.98) 
+        # Note: Changed y to 0.98 or 1.0 to ensure it doesn't get cropped. 
+        # If 1.03 cuts off, lower it. If it overlaps plots, raise it or adjust tight_layout padding.
+
         plt.tight_layout()
+        
+        # Save
         out = os.path.join(self.results_base_dir, f"training_curves{save_suffix}.png")
         plt.savefig(out, dpi=300, bbox_inches="tight")
         plt.close()
         logger.info(f"Saved plot → {out}")
-
 
 class LoggingClientManager(SimpleClientManager):
     def __init__(self, expected_clients: int):
