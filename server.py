@@ -436,7 +436,7 @@ class MedicalFLStrategy(fl.server.strategy.FedAvg):
             if models_dir not in sys.path:
                 sys.path.insert(0, models_dir)
 
-            model = get_model(self.model_name, num_classes=self.num_classes, pretrained=False)
+            model = get_model(self.model_name, num_classes=self.num_classes, pretrained=True)
 
             best_state_dict = OrderedDict()
             for (name, param), arr in zip(
@@ -471,7 +471,7 @@ class MedicalFLStrategy(fl.server.strategy.FedAvg):
             if models_dir not in sys.path:
                 sys.path.insert(0, models_dir)
 
-            model = get_model(self.model_name, num_classes=self.num_classes, pretrained=False)
+            model = get_model(self.model_name, num_classes=self.num_classes, pretrained=True)
 
             last_state_dict = OrderedDict()
             for (name, param), arr in zip(
