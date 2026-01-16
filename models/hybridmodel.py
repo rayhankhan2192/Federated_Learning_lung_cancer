@@ -15,7 +15,7 @@ class HybridViTCNNMLP(nn.Module):
         pretrained: bool = True,
         vit_name: str = "vit_base_patch16_224",
         dropout_rate: float = 0.3,
-        freeze_backbones: bool = False,
+        freeze_backbones: bool = True,
     ):
         super().__init__()
 

@@ -15,7 +15,7 @@ class HybridSwinDenseNetMLP(nn.Module):
         pretrained: bool = True,
         swin_name: str = "swin_tiny_patch4_window7_224",
         dropout: float = 0.3,
-        freeze_backbones: bool = False,
+        freeze_backbones: bool = True,
     ):
         super().__init__()
 
