@@ -178,15 +178,13 @@ def get_medical_transforms(image_size: Tuple[int, int] = (224, 224),
     #     ])
     if subset == 'train':
         transform = A.Compose([
-            # --- OLD: ---
-            # A.Resize(224, 224),
-            # --- NEW: Stronger augmentation to break shortcuts ---
-            A.RandomResizedCrop(height=224, width=224, scale=(0.8, 1.0), ratio=(0.9, 1.1), p=1.0),
+            # FIX: Use 'size' tuple instead of separate height/width for newer Albumentations
+            A.RandomResizedCrop(size=image_size, scale=(0.8, 1.0), ratio=(0.9, 1.1), p=1.0),
             
             A.HorizontalFlip(p=0.5),
-            A.Rotate(limit=15, p=0.5), # Increased limit slightly
+            A.Rotate(limit=15, p=0.5),
             
-            # Use constant fill (black) for rotation artifacts to match CT background
+            # Use constant fill (black) for rotation artifacts
             A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.1, rotate_limit=0, p=0.5, border_mode=cv2.BORDER_CONSTANT, value=0),
             
             A.Normalize(mean=[0.5], std=[0.5]),
