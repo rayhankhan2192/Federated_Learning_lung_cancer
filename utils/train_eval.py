@@ -330,7 +330,7 @@ class ModelTrainer:
 
     
 
-    def evaluate(self, test_loader: DataLoader) -> Dict:
+    def evaluate(self, test_loader: DataLoader, save_name: str = "confusion_matrix.png") -> Dict:
         """Comprehensive evaluation on test set"""
         self.model.eval()
 
@@ -359,7 +359,7 @@ class ModelTrainer:
         )
         
         # Generate and save confusion matrix
-        self.plot_confusion_matrix(all_labels, all_predictions)
+        self.plot_confusion_matrix(all_labels, all_predictions, save_path=os.path.join(self.save_dir, save_name))
         
         # Generate classification report
         self._generate_classification_report(test_metrics)
