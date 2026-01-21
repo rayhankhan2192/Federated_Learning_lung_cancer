@@ -432,8 +432,14 @@ class MedicalFLClient(fl.client.NumPyClient):
             scheduler_name=scheduler_name,
         )
 
+        rnd = config.get("server_round", 0)
+
         # Evaluate on test
-        test_metrics = self.trainer.evaluate(self.test_loader)
+        # test_metrics = self.trainer.evaluate(self.test_loader)
+        test_metrics = self.trainer.evaluate(
+            self.test_loader, 
+            save_name=f"round_{rnd}_local_trained_matrix.png"
+        )
 
         # XAI probe (optional)
         xai_metrics = self._xai_probe(self.val_loader, num_samples=16, save_k=3) if self.target_layer else {
@@ -464,8 +470,14 @@ class MedicalFLClient(fl.client.NumPyClient):
     def evaluate(self, parameters: List[np.ndarray], config: Dict) -> Tuple[float, int, Dict]:
         logger.info(f"Client {self.client_id}: Starting evaluation")
         self.set_parameters(parameters)
+        rnd = config.get("server_round", 0)
 
-        test_metrics = self.trainer.evaluate(self.test_loader)
+        #test_metrics = self.trainer.evaluate(self.test_loader)
+        test_metrics = self.trainer.evaluate(
+            self.test_loader, 
+            save_name=f"round_{rnd}_global_weights_matrix.png"
+        )
+        
         add_xai = self._xai_probe(self.val_loader, num_samples=12, save_k=0) if self.target_layer else {
             "xai_del_auc_mean": 0.0, "xai_del_auc_std": 0.0
         }
