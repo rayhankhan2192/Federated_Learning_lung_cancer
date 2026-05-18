@@ -190,7 +190,11 @@ def compute_deletion_auc(
                 x_mod[0, :, row, col] = -1.0  # assuming input normalized in [-1, 1]
         
         fractions = np.linspace(0.0, 1.0, len(scores))
-        auc = float(np.trapz(scores, fractions))
+        # auc = float(np.trapz(scores, fractions))
+        if hasattr(np, "trapezoid"):
+            auc = float(np.trapezoid(scores, fractions))
+        else:
+            auc = float(np.trapz(scores, fractions))
         
         return auc
 
@@ -477,7 +481,7 @@ class MedicalFLClient(fl.client.NumPyClient):
             self.test_loader, 
             save_name=f"round_{rnd}_global_weights_matrix.png"
         )
-        
+
         add_xai = self._xai_probe(self.val_loader, num_samples=12, save_k=0) if self.target_layer else {
             "xai_del_auc_mean": 0.0, "xai_del_auc_std": 0.0
         }
